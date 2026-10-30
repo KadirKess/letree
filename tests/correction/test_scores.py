@@ -1,15 +1,15 @@
 import numpy as np
 import pytest
 
-from lenahs.component_tree import ComponentTreeKind
-from lenahs.correction.decoder import decode_correction
-from lenahs.correction.scores import (
+from letree.component_tree import ComponentTreeKind
+from letree.correction.decoder import decode_correction
+from letree.correction.scores import (
     CorrectionScores,
     score_correction,
     tree_correction,
 )
-from lenahs.generation import derive_correction_targets
-from lenahs.generation.samples import _build_production_tree
+from letree.generation import derive_correction_targets
+from letree.generation.samples import _build_production_tree
 
 
 def _ints(values) -> np.ndarray:

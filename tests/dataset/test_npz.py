@@ -1,18 +1,18 @@
 import numpy as np
 import pytest
 
-from lenahs.component_tree import (
+from letree.component_tree import (
     ComponentTreeKind,
     build_reference_component_tree,
     build_reference_rag,
 )
-from lenahs.dataset import (
+from letree.dataset import (
     NoisyObservation,
     SampleFamily,
     load_sample_family,
     save_sample_family,
 )
-from lenahs.generation import (
+from letree.generation import (
     AdditiveGaussianNoise,
     GenerationSample,
     GenerationStage,
@@ -235,9 +235,9 @@ def test_family_reader_rejects_an_unknown_schema_version(tmp_path) -> None:
 
 
 def test_loading_and_adaptation_do_not_rederive_targets(tmp_path, monkeypatch) -> None:
-    import lenahs.generation.samples as sample_module
-    import lenahs.generation.targets as target_module
-    from lenahs.model import adapt_generation_sample
+    import letree.generation.samples as sample_module
+    import letree.generation.targets as target_module
+    from letree.model import adapt_generation_sample
 
     family = _build_family(np.array([[10, 10, 30], [10, 20, 30]], dtype=np.uint8))
     path = tmp_path / "family.npz"
@@ -385,7 +385,7 @@ def test_schema_one_family_is_left_untouched(tmp_path) -> None:
 
 
 def test_failed_family_write_removes_only_its_temporary_file(tmp_path, monkeypatch):
-    import lenahs.dataset.npz as codec
+    import letree.dataset.npz as codec
 
     family = _build_family(np.array([[10, 20]], dtype=np.uint8))
     path = tmp_path / "family.npz"
@@ -440,7 +440,7 @@ def test_failed_family_write_removes_only_its_temporary_file(tmp_path, monkeypat
 def test_schema_two_keeps_clean_and_observed_diagnostic_scopes(
     tmp_path, kind, clean_values, observed_values, parents, actions, missing
 ):
-    from lenahs.generation import derive_correction_targets
+    from letree.generation import derive_correction_targets
 
     clean = build_generation_sample(np.asarray(clean_values, dtype=np.uint8), kind)
     observed = build_generation_sample(

@@ -1,9 +1,9 @@
 import pytest
 
-from lenahs.component_tree import ComponentTreeKind
-from lenahs.dataset.build import generate_dataset
-from lenahs.generation import SaltAndPepperNoise, SquareImageConfig
-from lenahs.training.data import ObservationDataset, make_loader
+from letree.component_tree import ComponentTreeKind
+from letree.dataset.build import generate_dataset
+from letree.generation import SaltAndPepperNoise, SquareImageConfig
+from letree.training.data import ObservationDataset, make_loader
 
 SMALL_IMAGES = SquareImageConfig(
     height=16, width=16, min_squares=2, max_squares=4, min_side=2, max_side=8

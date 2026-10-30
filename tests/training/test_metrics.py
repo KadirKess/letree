@@ -3,8 +3,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lenahs.generation import CorrectionAction
-from lenahs.training.metrics import (
+from letree.generation import CorrectionAction
+from letree.training.metrics import (
     batch_image_metrics,
     graph_local_argmax,
     summarize_image_metrics,

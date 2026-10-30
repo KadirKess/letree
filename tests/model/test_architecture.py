@@ -3,7 +3,7 @@ import json
 import pytest
 import torch
 
-from lenahs.model import RGNNConfig, build_rgnn
+from letree.model import RGNNConfig, build_rgnn
 
 
 def test_saved_specification_reconstructs_the_observed_model() -> None:

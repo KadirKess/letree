@@ -3,7 +3,7 @@ from math import sqrt
 import pytest
 import torch
 
-from lenahs.model import (
+from letree.model import (
     CorrectionModelConfig,
     build_correction_model,
 )

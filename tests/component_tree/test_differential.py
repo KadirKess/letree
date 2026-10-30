@@ -6,16 +6,16 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from lenahs.component_tree import (
+from letree.component_tree import (
     ComponentTreeKind,
     build_reference_component_tree,
     build_reference_rag,
 )
-from lenahs.component_tree.higra import (
+from letree.component_tree.higra import (
     HigraRagContext,
     build_higra_rag,
-    higra_to_nahs_vectorized,
-    nahs_to_higra,
+    higra_to_node_parents_vectorized,
+    node_parents_to_higra,
 )
 
 
@@ -34,7 +34,7 @@ def _small_uint8_images(draw):
 
 
 def _build_higra_tree(graph, context, kind):
-    higra_levels = graph.levels[context.higra_to_nahs]
+    higra_levels = graph.levels[context.higra_to_rag_node]
     if kind == ComponentTreeKind.MAX_TREE:
         return hg.component_tree_max_tree(context.rag, higra_levels)
     return hg.component_tree_min_tree(context.rag, higra_levels)
@@ -43,7 +43,7 @@ def _build_higra_tree(graph, context, kind):
 def _build_converted_tree(image, kind):
     graph, context = build_higra_rag(image)
     higra_tree, altitudes = _build_higra_tree(graph, context, kind)
-    component_tree = higra_to_nahs_vectorized(
+    component_tree = higra_to_node_parents_vectorized(
         graph,
         higra_tree,
         context,
@@ -56,19 +56,19 @@ def _component_structure_by_pixels(
     graph,
     higra_tree,
     altitudes,
-    leaf_to_nahs,
+    leaf_to_rag_node,
     pixel_ids=None,
 ):
     parents = np.asarray(higra_tree.parents(), dtype=np.int64)
-    leaf_count = leaf_to_nahs.size
+    leaf_count = leaf_to_rag_node.size
     if pixel_ids is None:
         pixel_ids = np.arange(graph.label_map.size, dtype=np.int64).reshape(
             graph.label_map.shape
         )
 
     members = [set() for _ in range(parents.size)]
-    for leaf, nahs_node in enumerate(leaf_to_nahs):
-        zone_pixels = pixel_ids[graph.label_map == int(nahs_node)]
+    for leaf, rag_node in enumerate(leaf_to_rag_node):
+        zone_pixels = pixel_ids[graph.label_map == int(rag_node)]
         members[leaf].update(int(pixel) for pixel in zone_pixels)
 
     for node, parent in enumerate(parents):
@@ -102,7 +102,7 @@ def _assert_complete_round_trip(image):
             image,
             kind,
         )
-        reconstructed = nahs_to_higra(graph, component_tree)
+        reconstructed = node_parents_to_higra(graph, component_tree)
 
         assert hg.CptHierarchy.validate(reconstructed.tree)
         assert _component_structure_by_pixels(
@@ -114,14 +114,14 @@ def _assert_complete_round_trip(image):
             graph,
             original,
             altitudes,
-            context.higra_to_nahs,
+            context.higra_to_rag_node,
         )
 
         reconstructed_context = HigraRagContext(
             rag=hg.CptHierarchy.get_leaf_graph(reconstructed.tree),
-            higra_to_nahs=np.arange(graph.levels.size, dtype=np.int64),
+            higra_to_rag_node=np.arange(graph.levels.size, dtype=np.int64),
         )
-        round_trip = higra_to_nahs_vectorized(
+        round_trip = higra_to_node_parents_vectorized(
             graph,
             reconstructed.tree,
             reconstructed_context,
@@ -139,7 +139,7 @@ def test_random_small_images_match_the_reference_through_the_complete_path(image
 
     for kind in ComponentTreeKind:
         higra_tree, altitudes = _build_higra_tree(graph, context, kind)
-        component_tree = higra_to_nahs_vectorized(
+        component_tree = higra_to_node_parents_vectorized(
             graph,
             higra_tree,
             context,
@@ -148,7 +148,7 @@ def test_random_small_images_match_the_reference_through_the_complete_path(image
         reference_tree = build_reference_component_tree(reference_graph, kind)
         np.testing.assert_array_equal(component_tree.parents, reference_tree.parents)
 
-        reconstructed = nahs_to_higra(graph, component_tree)
+        reconstructed = node_parents_to_higra(graph, component_tree)
         assert _component_structure_by_pixels(
             graph,
             reconstructed.tree,
@@ -158,7 +158,7 @@ def test_random_small_images_match_the_reference_through_the_complete_path(image
             graph,
             higra_tree,
             altitudes,
-            context.higra_to_nahs,
+            context.higra_to_rag_node,
         )
 
 
@@ -231,13 +231,13 @@ def test_spatial_transformations_preserve_component_structure(transform, image):
 
     for kind in ComponentTreeKind:
         graph, _, _, _, component_tree = _build_converted_tree(image, kind)
-        reconstructed = nahs_to_higra(graph, component_tree)
+        reconstructed = node_parents_to_higra(graph, component_tree)
 
         transformed_graph, _, _, _, transformed_tree = _build_converted_tree(
             transformed_image,
             kind,
         )
-        transformed_reconstructed = nahs_to_higra(
+        transformed_reconstructed = node_parents_to_higra(
             transformed_graph,
             transformed_tree,
         )

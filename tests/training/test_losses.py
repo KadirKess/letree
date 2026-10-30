@@ -5,15 +5,15 @@ import torch
 from torch.nn import functional as F
 from torch_geometric.data import Batch
 
-from lenahs.component_tree import ComponentTreeKind
-from lenahs.dataset.build import build_sample_family
-from lenahs.generation import SaltAndPepperNoise, SquareImageConfig
-from lenahs.model import (
+from letree.component_tree import ComponentTreeKind
+from letree.dataset.build import build_sample_family
+from letree.generation import SaltAndPepperNoise, SquareImageConfig
+from letree.model import (
     CorrectionModelConfig,
     adapt_generation_sample,
     build_correction_model,
 )
-from lenahs.training.losses import correction_losses, image_mean, parent_cross_entropy
+from letree.training.losses import correction_losses, image_mean, parent_cross_entropy
 
 SMALL_IMAGES = SquareImageConfig(
     height=16, width=16, min_squares=2, max_squares=4, min_side=2, max_side=8

@@ -3,9 +3,9 @@ import itertools
 import numpy as np
 import pytest
 
-from lenahs.component_tree import build_reference_rag
-from lenahs.component_tree.higra import build_higra_rag
-from lenahs.component_tree.higra.rag import _remap_higra_regions
+from letree.component_tree import build_reference_rag
+from letree.component_tree.higra import build_higra_rag
+from letree.component_tree.higra.rag import _remap_higra_regions
 
 from .cases import CASES
 
@@ -27,7 +27,7 @@ def test_named_cases_match_reference_rag(case_name):
     _assert_same_graph(graph, build_reference_rag(image))
 
 
-def test_repeated_calls_return_identical_nahs_arrays():
+def test_repeated_calls_return_identical_rag_arrays():
     image = CASES["saddle_or_merge"]["image"]
 
     first, _ = build_higra_rag(image)
@@ -36,13 +36,13 @@ def test_repeated_calls_return_identical_nahs_arrays():
     _assert_same_graph(first, second)
 
 
-def test_context_maps_higra_regions_to_nahs_nodes():
+def test_context_maps_higra_regions_to_rag_nodes():
     image = CASES["saddle_or_merge"]["image"]
 
     graph, context = build_higra_rag(image)
 
     np.testing.assert_array_equal(
-        context.higra_to_nahs[context.rag.vertex_map].reshape(image.shape),
+        context.higra_to_rag_node[context.rag.vertex_map].reshape(image.shape),
         graph.label_map,
     )
 

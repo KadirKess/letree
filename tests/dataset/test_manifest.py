@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from lenahs.component_tree import ComponentTreeKind
-from lenahs.dataset import (
+from letree.component_tree import ComponentTreeKind
+from letree.dataset import (
     DatasetManifest,
     load_dataset_manifest,
     save_dataset_manifest,

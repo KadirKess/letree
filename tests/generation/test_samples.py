@@ -3,13 +3,13 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 
-import lenahs.generation.samples as sample_module
-from lenahs.component_tree import (
+import letree.generation.samples as sample_module
+from letree.component_tree import (
     ComponentTreeKind,
     build_reference_component_tree,
     build_reference_rag,
 )
-from lenahs.generation import (
+from letree.generation import (
     SaltAndPepperNoise,
     build_generation_sample,
 )
@@ -195,7 +195,7 @@ def test_default_builder_dispatches_requested_higra_tree_and_vectorized_converte
         calls["unselected"] += 1
         raise AssertionError("The unrequested Higra tree builder was called.")
 
-    converter = sample_module.higra_to_nahs_vectorized
+    converter = sample_module.higra_to_node_parents_vectorized
 
     def record_converter(*args, **kwargs):
         calls["converter"] += 1
@@ -205,7 +205,7 @@ def test_default_builder_dispatches_requested_higra_tree_and_vectorized_converte
     monkeypatch.setattr(sample_module.hg, unselected_name, record_unselected)
     monkeypatch.setattr(
         sample_module,
-        "higra_to_nahs_vectorized",
+        "higra_to_node_parents_vectorized",
         record_converter,
     )
 

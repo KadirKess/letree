@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from lenahs.generation.images import SquareImageConfig, generate_square_image
+from letree.generation.images import SquareImageConfig, generate_square_image
 
 
 def test_fixed_background_without_squares() -> None:

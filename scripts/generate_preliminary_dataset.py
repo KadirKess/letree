@@ -6,10 +6,10 @@ uv run python scripts/generate_preliminary_dataset.py ROOT
 import argparse
 import os
 
-from lenahs.component_tree.types import ComponentTreeKind
-from lenahs.dataset.build import generate_dataset
-from lenahs.generation.images import SquareImageConfig
-from lenahs.generation.noise import SaltAndPepperNoise
+from letree.component_tree.types import ComponentTreeKind
+from letree.dataset.build import generate_dataset
+from letree.generation.images import SquareImageConfig
+from letree.generation.noise import SaltAndPepperNoise
 
 
 def parse_arguments() -> argparse.Namespace:

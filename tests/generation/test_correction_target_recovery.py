@@ -3,14 +3,14 @@ from itertools import product
 import numpy as np
 import pytest
 
-from lenahs.component_tree.reference import (
+from letree.component_tree.reference import (
     build_reference_component_tree,
     build_reference_rag,
 )
-from lenahs.component_tree.types import ComponentTree, ComponentTreeKind, FlatZoneGraph
-from lenahs.generation import derive_correction_targets
-from lenahs.generation.samples import _build_production_tree
-from lenahs.generation.targets import CorrectionAction
+from letree.component_tree.types import ComponentTree, ComponentTreeKind, FlatZoneGraph
+from letree.generation import derive_correction_targets
+from letree.generation.samples import _build_production_tree
+from letree.generation.targets import CorrectionAction
 
 
 def _checked_graph(image, kind):
@@ -49,7 +49,7 @@ def _threshold_depth(image, kind):
                         pending.append(neighbor)
             components.add(frozenset(row * width + column for row, column in component))
 
-    # Distinct threshold components count strict depth, without NAHS parent links.
+    # Distinct threshold components count strict depth, without node parent links.
     depths = np.full(height * width, -1, dtype=np.int64)
     for component in components:
         for pixel in component:

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from lenahs.component_tree import build_reference_rag
+from letree.component_tree import build_reference_rag
 
 from .cases import CASES
 

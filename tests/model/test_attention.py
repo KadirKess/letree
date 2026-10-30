@@ -3,7 +3,7 @@ from math import sqrt
 import torch
 from torch.nn import functional as F
 
-from lenahs.model import readable_graph_attention
+from letree.model import readable_graph_attention
 
 
 def test_readable_attention_computes_independent_graph_blocks() -> None:

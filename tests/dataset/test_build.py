@@ -1,10 +1,10 @@
 import numpy as np
 import pytest
 
-from lenahs.component_tree import ComponentTreeKind
-from lenahs.dataset import NpzDataset
-from lenahs.dataset.build import build_sample_family, generate_dataset
-from lenahs.generation import SaltAndPepperNoise, SquareImageConfig
+from letree.component_tree import ComponentTreeKind
+from letree.dataset import NpzDataset
+from letree.dataset.build import build_sample_family, generate_dataset
+from letree.generation import SaltAndPepperNoise, SquareImageConfig
 
 SMALL_IMAGES = SquareImageConfig(
     height=16, width=16, min_squares=2, max_squares=4, min_side=2, max_side=8

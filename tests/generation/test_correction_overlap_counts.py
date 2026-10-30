@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from lenahs.component_tree.reference import build_reference_rag
-from lenahs.generation.targets import _count_zone_overlaps
+from letree.component_tree.reference import build_reference_rag
+from letree.generation.targets import _count_zone_overlaps
 
 
 @pytest.mark.parametrize("permute_ids", [False, True])

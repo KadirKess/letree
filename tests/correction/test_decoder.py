@@ -3,13 +3,13 @@ import inspect
 import numpy as np
 import pytest
 
-from lenahs.component_tree import ComponentTreeKind
-from lenahs.correction.decoder import (
+from letree.component_tree import ComponentTreeKind
+from letree.correction.decoder import (
     CorrectionDecodeError,
     DecodeFailureReason,
     decode_correction,
 )
-from lenahs.generation import CorrectionAction, build_generation_sample
+from letree.generation import CorrectionAction, build_generation_sample
 
 MERGE = CorrectionAction.MERGE
 KEEP_ZERO = CorrectionAction.KEEP_ZERO

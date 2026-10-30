@@ -3,7 +3,7 @@ import json
 import pytest
 import torch
 
-from lenahs.model import (
+from letree.model import (
     CorrectionModelConfig,
     CorrectionRunConfig,
     build_correction_model,

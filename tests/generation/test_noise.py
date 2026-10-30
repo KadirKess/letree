@@ -3,7 +3,7 @@ from math import sqrt
 import numpy as np
 import pytest
 
-from lenahs.generation.noise import (
+from letree.generation.noise import (
     AdditiveGaussianNoise,
     PoissonNoise,
     SaltAndPepperNoise,

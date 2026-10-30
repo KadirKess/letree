@@ -3,7 +3,7 @@ from itertools import permutations
 import numpy as np
 import pytest
 
-from lenahs.component_tree import choose_representative
+from letree.component_tree import choose_representative
 
 from .cases import CASES
 

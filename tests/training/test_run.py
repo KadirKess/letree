@@ -4,17 +4,17 @@ import pytest
 import torch
 from torch_geometric.data import Batch
 
-from lenahs.component_tree import ComponentTreeKind
-from lenahs.dataset.build import build_sample_family, generate_dataset
-from lenahs.generation import SaltAndPepperNoise, SquareImageConfig
-from lenahs.model import (
+from letree.component_tree import ComponentTreeKind
+from letree.dataset.build import build_sample_family, generate_dataset
+from letree.generation import SaltAndPepperNoise, SquareImageConfig
+from letree.model import (
     CorrectionModelConfig,
     CorrectionRunConfig,
     adapt_generation_sample,
     build_correction_model,
 )
-from lenahs.training.losses import correction_losses
-from lenahs.training.run import (
+from letree.training.losses import correction_losses
+from letree.training.run import (
     SELECTION_METRIC,
     PreliminaryRunSettings,
     epoch_report,

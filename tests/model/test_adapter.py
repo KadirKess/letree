@@ -3,20 +3,20 @@ import pytest
 import torch
 from torch_geometric.loader import DataLoader
 
-from lenahs.component_tree import (
+from letree.component_tree import (
     ComponentTree,
     ComponentTreeKind,
     FlatZoneGraph,
     build_reference_component_tree,
     build_reference_rag,
 )
-from lenahs.generation import (
+from letree.generation import (
     GenerationSample,
     TreeImage,
     build_generation_sample,
     derive_correction_targets,
 )
-from lenahs.model import (
+from letree.model import (
     ModelData,
     adapt_generation_sample,
 )

@@ -4,7 +4,7 @@ import sys
 
 import numpy as np
 
-from lenahs.component_tree import ComponentTree, ComponentTreeKind, FlatZoneGraph
+from letree.component_tree import ComponentTree, ComponentTreeKind, FlatZoneGraph
 
 
 def test_flat_zone_graph_exposes_supplied_fields_without_conversion():
@@ -60,11 +60,11 @@ def test_public_imports_do_not_require_deferred_frameworks(monkeypatch):
         return original_import(name, *args, **kwargs)
 
     for module_name in list(sys.modules):
-        if module_name == "lenahs" or module_name.startswith("lenahs."):
+        if module_name == "letree" or module_name.startswith("letree."):
             monkeypatch.delitem(sys.modules, module_name)
     monkeypatch.setattr(builtins, "__import__", guarded_import)
 
-    module = importlib.import_module("lenahs")
+    module = importlib.import_module("letree")
 
-    assert module.FlatZoneGraph.__module__ == "lenahs.component_tree.types"
-    assert module.ComponentTree.__module__ == "lenahs.component_tree.types"
+    assert module.FlatZoneGraph.__module__ == "letree.component_tree.types"
+    assert module.ComponentTree.__module__ == "letree.component_tree.types"

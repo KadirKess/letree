@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from lenahs.generation import (
+from letree.generation import (
     AdditiveGaussianNoise,
     GenerationStage,
     PoissonNoise,

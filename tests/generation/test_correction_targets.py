@@ -3,12 +3,12 @@ import tracemalloc
 import numpy as np
 import pytest
 
-from lenahs.component_tree.reference import (
+from letree.component_tree.reference import (
     build_reference_component_tree,
     build_reference_rag,
 )
-from lenahs.component_tree.types import ComponentTree, ComponentTreeKind, FlatZoneGraph
-from lenahs.generation import derive_correction_targets
+from letree.component_tree.types import ComponentTree, ComponentTreeKind, FlatZoneGraph
+from letree.generation import derive_correction_targets
 
 
 @pytest.mark.parametrize("kind", list(ComponentTreeKind))

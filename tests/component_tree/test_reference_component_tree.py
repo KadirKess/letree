@@ -3,7 +3,7 @@ from itertools import product
 import numpy as np
 import pytest
 
-from lenahs.component_tree import (
+from letree.component_tree import (
     ComponentTreeKind,
     FlatZoneGraph,
     build_reference_component_tree,

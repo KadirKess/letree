@@ -1,13 +1,13 @@
 import numpy as np
 import pytest
 
-from lenahs.component_tree import (
+from letree.component_tree import (
     ComponentTreeKind,
     build_reference_component_tree,
     build_reference_rag,
 )
-from lenahs.dataset import DatasetManifest, NpzDataset, SampleFamily
-from lenahs.generation import build_generation_sample
+from letree.dataset import DatasetManifest, NpzDataset, SampleFamily
+from letree.generation import build_generation_sample
 
 
 def _build_reference_tree(image, kind):

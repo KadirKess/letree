@@ -4,7 +4,7 @@ import pytest
 import torch
 from torch import nn
 
-from lenahs.model import (
+from letree.model import (
     RGNN,
     AllNodeParentHead,
     NodeEncoder,

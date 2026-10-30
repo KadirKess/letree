@@ -5,8 +5,8 @@ uv run python scripts/train_preliminary.py DATASET RUN_DIRECTORY
 
 import argparse
 
-from lenahs.model.architecture import CorrectionModelConfig, CorrectionRunConfig
-from lenahs.training.run import PreliminaryRunSettings, fit
+from letree.model.architecture import CorrectionModelConfig, CorrectionRunConfig
+from letree.training.run import PreliminaryRunSettings, fit
 
 
 def parse_arguments() -> argparse.Namespace:
