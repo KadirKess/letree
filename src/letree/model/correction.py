@@ -3,8 +3,10 @@
 from dataclasses import dataclass
 
 from torch import Tensor, nn
+from torch.nn.attention.flex_attention import BlockMask
 
 from letree.model.action import MergeDepthHead
+from letree.model.attention import same_graph_block_mask
 from letree.model.network import RGNN, ObservedStep
 from letree.model.parent import AllNodeParentHead
 from letree.model.recurrent import RecurrentRagProcessor
@@ -13,8 +15,6 @@ from letree.model.recurrent import RecurrentRagProcessor
 @dataclass(frozen=True)
 class CorrectionStep:
     hidden_state: Tensor
-    corrective_scores: tuple[Tensor, ...]
-    corrective_probabilities: tuple[Tensor, ...]
     expected_destination_state: Tensor
     action_logits: Tensor
     corrective_query: Tensor
@@ -57,9 +57,14 @@ class CorrectionModel(nn.Module):
         # We have two paths depending on the number of observed steps. If there
         # are none, we skip the RGNN and just use the static embedding.
         embedding = self.observed_model.encoder(node_features)
+        block_mask = (
+            same_graph_block_mask(graph_ptr)
+            if self.corrective_parent_head.attention == "flex"
+            else None
+        )
         if observed_steps > 0:
             observed = self.observed_model._run_steps(
-                embedding, edge_index, graph_ptr, observed_steps
+                embedding, edge_index, graph_ptr, block_mask, observed_steps
             )
             hidden_state = observed[-1].hidden_state
         else:
@@ -68,7 +73,7 @@ class CorrectionModel(nn.Module):
 
         # Read the corrective message before the first update. Every later update
         # uses corrective feedback and the same original feature embedding and RAG.
-        correction = self._read_correction(hidden_state, graph_ptr)
+        correction = self._read_correction(hidden_state, graph_ptr, block_mask)
         corrections = [correction]
         for _ in range(correction_steps):
             hidden_state = self.corrective_processor(
@@ -77,7 +82,7 @@ class CorrectionModel(nn.Module):
                 edge_index,
                 correction.expected_destination_state,
             )
-            correction = self._read_correction(hidden_state, graph_ptr)
+            correction = self._read_correction(hidden_state, graph_ptr, block_mask)
             corrections.append(correction)
         return CorrectionModelOutput(
             observed_steps=observed,
@@ -88,16 +93,15 @@ class CorrectionModel(nn.Module):
         self,
         hidden_state: Tensor,
         graph_ptr: Tensor,
+        block_mask: BlockMask | None,
     ) -> CorrectionStep:
-        destinations = self.corrective_parent_head(hidden_state, graph_ptr)
+        destinations = self.corrective_parent_head(hidden_state, graph_ptr, block_mask)
 
         # Corrective context comes from this head, not the observed parent message.
         # Keeping the soft destination state lets action gradients reach the scorer.
         action_logits = self.action_head(hidden_state, destinations.parent_message)
         return CorrectionStep(
             hidden_state=hidden_state,
-            corrective_scores=destinations.scores,
-            corrective_probabilities=destinations.probabilities,
             expected_destination_state=destinations.parent_message,
             action_logits=action_logits,
             corrective_query=destinations.query,

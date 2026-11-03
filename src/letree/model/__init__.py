@@ -13,7 +13,12 @@ from letree.model.architecture import (
     build_correction_model,
     build_rgnn,
 )
-from letree.model.attention import ParentAttentionOutput, readable_graph_attention
+from letree.model.attention import (
+    ParentAttentionOutput,
+    flex_graph_attention,
+    readable_graph_attention,
+    same_graph_block_mask,
+)
 from letree.model.correction import (
     CorrectionModel,
     CorrectionModelOutput,
@@ -42,5 +47,7 @@ __all__ = [
     "adapt_generation_sample",
     "build_correction_model",
     "build_rgnn",
+    "flex_graph_attention",
     "readable_graph_attention",
+    "same_graph_block_mask",
 ]

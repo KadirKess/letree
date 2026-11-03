@@ -31,9 +31,10 @@ def test_saved_specification_reconstructs_the_observed_model() -> None:
         strict=True,
     ):
         torch.testing.assert_close(actual.hidden_state, expected.hidden_state)
-        torch.testing.assert_close(actual.parent_scores[0], expected.parent_scores[0])
+        torch.testing.assert_close(actual.parent_query, expected.parent_query)
+        torch.testing.assert_close(actual.parent_key, expected.parent_key)
         torch.testing.assert_close(
-            actual.parent_probabilities[0], expected.parent_probabilities[0]
+            actual.parent_log_normalizers, expected.parent_log_normalizers
         )
         torch.testing.assert_close(actual.parent_message, expected.parent_message)
 

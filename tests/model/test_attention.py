@@ -22,11 +22,15 @@ def test_readable_attention_computes_independent_graph_blocks() -> None:
 
     expected_first_scores = query[:3] @ key[:3].T / sqrt(2)
     expected_first_probabilities = F.softmax(expected_first_scores, dim=1)
-    assert [value.shape for value in output.scores] == [(3, 3), (1, 1)]
-    torch.testing.assert_close(output.scores[0], expected_first_scores)
-    torch.testing.assert_close(output.scores[1], torch.tensor([[7 / sqrt(2)]]))
-    torch.testing.assert_close(output.probabilities[0], expected_first_probabilities)
-    torch.testing.assert_close(output.probabilities[1], torch.ones(1, 1))
+    torch.testing.assert_close(
+        output.log_normalizers,
+        torch.cat(
+            (
+                torch.logsumexp(expected_first_scores, dim=1),
+                torch.tensor([7 / sqrt(2)]),
+            )
+        ),
+    )
     torch.testing.assert_close(
         output.parent_message,
         torch.cat(
@@ -48,6 +52,5 @@ def test_one_node_attention_returns_its_current_hidden_state() -> None:
         graph_ptr=torch.tensor([0, 1]),
     )
 
-    assert output.scores[0].shape == (1, 1)
-    torch.testing.assert_close(output.probabilities[0], torch.ones(1, 1))
+    torch.testing.assert_close(output.log_normalizers, torch.tensor([32 / sqrt(3)]))
     torch.testing.assert_close(output.parent_message, hidden_state)

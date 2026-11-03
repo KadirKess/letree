@@ -28,16 +28,10 @@ class _FixedObserved(nn.Module):
         self.encoder = lambda features: self.hidden_state
         self.parent_message = parent_message
 
-    def _run_steps(self, embedding, edge_index, graph_ptr, steps):
-        blocks = tuple(
-            self.hidden_state.new_zeros(int(stop - start), int(stop - start))
-            for start, stop in zip(graph_ptr[:-1], graph_ptr[1:], strict=True)
-        )
+    def _run_steps(self, embedding, edge_index, graph_ptr, block_mask, steps):
         return (
             ObservedStep(
                 self.hidden_state,
-                blocks,
-                blocks,
                 self.parent_message,
                 parent_query=self.hidden_state,
                 parent_key=self.hidden_state,
@@ -46,6 +40,14 @@ class _FixedObserved(nn.Module):
                 ),
             ),
         )
+
+
+def _probabilities(step, start, stop):
+    # Rebuilt from the stored query, key and log Z of one graph
+    query = step.corrective_query[start:stop]
+    key = step.corrective_key[start:stop]
+    scores = query @ key.T / sqrt(query.shape[1])
+    return torch.exp(scores - step.corrective_log_normalizers[start:stop, None])
 
 
 def _fixed_readout():
@@ -107,12 +109,12 @@ def test_corrective_readout_matches_hand_calculated_unequal_graphs():
         dim=1,
     )
     assert correction.hidden_state is output.observed_steps[-1].hidden_state
-    for actual, expected in zip(correction.corrective_scores, scores, strict=True):
-        torch.testing.assert_close(actual, expected)
-    for actual, expected in zip(
-        correction.corrective_probabilities, probabilities, strict=True
-    ):
-        torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(correction.corrective_query, query)
+    torch.testing.assert_close(correction.corrective_key, key)
+    torch.testing.assert_close(
+        correction.corrective_log_normalizers,
+        torch.cat([torch.logsumexp(score, dim=1) for score in scores]),
+    )
     torch.testing.assert_close(correction.expected_destination_state, destination)
     torch.testing.assert_close(correction.action_logits, actions)
 
@@ -167,11 +169,13 @@ def test_adding_readout_preserves_every_observed_step_exactly():
         torch.testing.assert_close(
             actual_step.parent_message, expected_step.parent_message, rtol=0, atol=0
         )
-        for field in ("parent_scores", "parent_probabilities"):
-            for actual_block, expected_block in zip(
-                getattr(actual_step, field), getattr(expected_step, field), strict=True
-            ):
-                torch.testing.assert_close(actual_block, expected_block, rtol=0, atol=0)
+        for field in ("parent_query", "parent_key", "parent_log_normalizers"):
+            torch.testing.assert_close(
+                getattr(actual_step, field),
+                getattr(expected_step, field),
+                rtol=0,
+                atol=0,
+            )
 
 
 def test_self_and_non_neighbor_destinations_remain_candidates():
@@ -182,7 +186,7 @@ def test_self_and_non_neighbor_destinations_remain_candidates():
     output = model(
         torch.zeros(4, 3), _path_edges(), torch.tensor([0, 3, 4]), observed_steps=1
     ).correction_steps[0]
-    probability = output.corrective_probabilities[0]
+    probability = _probabilities(output, 0, 3)
     assert probability.shape == (3, 3)
     assert torch.all(probability.diag() > 0)
     assert probability[0, 2] > 0
@@ -208,7 +212,7 @@ def test_correction_gradients_reach_the_shared_observed_model(test_loss):
     loss = (
         final.action_logits.square().sum()
         if test_loss == "action"
-        else final.corrective_scores[0].square().sum()
+        else final.corrective_log_normalizers.square().sum()
     )
     loss.backward()
     for module in (
@@ -256,10 +260,9 @@ def test_complete_correction_specification_and_state_dict_round_trip():
     torch.testing.assert_close(
         actual.expected_destination_state, expected.expected_destination_state
     )
-    for actual_block, expected_block in zip(
-        actual.corrective_scores, expected.corrective_scores, strict=True
-    ):
-        torch.testing.assert_close(actual_block, expected_block)
+    torch.testing.assert_close(
+        actual.corrective_log_normalizers, expected.corrective_log_normalizers
+    )
 
 
 @pytest.mark.parametrize("field", ["corrective_parent_head", "action_head"])
@@ -289,6 +292,7 @@ def test_one_pass_model_encodes_once_and_keeps_graphs_independent():
     torch.testing.assert_close(
         changed.action_logits[:3], original.action_logits[:3], rtol=0, atol=0
     )
-    torch.testing.assert_close(
-        changed.corrective_scores[0], original.corrective_scores[0], rtol=0, atol=0
-    )
+    for field in ("corrective_query", "corrective_key", "corrective_log_normalizers"):
+        torch.testing.assert_close(
+            getattr(changed, field)[:3], getattr(original, field)[:3], rtol=0, atol=0
+        )

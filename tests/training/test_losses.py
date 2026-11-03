@@ -1,4 +1,4 @@
-from math import exp, log
+from math import exp, log, sqrt
 
 import pytest
 import torch
@@ -68,6 +68,11 @@ def _forward(model, graphs, order):
     return model(batch.x, batch.edge_index, batch.ptr, 2, 1), batch
 
 
+def _scores(query, key, start, stop):
+    # Dense scores of one graph, independent of the stored log Z
+    return query[start:stop] @ key[start:stop].T / sqrt(query.shape[1])
+
+
 def test_losses_match_dense_cross_entropy_per_image(graphs) -> None:
     torch.manual_seed(0)
     model = build_correction_model(CorrectionModelConfig(8, True)).double()
@@ -77,15 +82,18 @@ def test_losses_match_dense_cross_entropy_per_image(graphs) -> None:
 
     expected = {"observed_parent": [], "corrective_parent": [], "action": []}
     bounds = batch.ptr.tolist()
-    for index, (start, stop) in enumerate(zip(bounds[:-1], bounds[1:])):
+    for start, stop in zip(bounds[:-1], bounds[1:]):
         expected["observed_parent"].append(
             F.cross_entropy(
-                observed.parent_scores[index], batch.observed_parents[start:stop]
+                _scores(observed.parent_query, observed.parent_key, start, stop),
+                batch.observed_parents[start:stop],
             )
         )
         expected["corrective_parent"].append(
             F.cross_entropy(
-                corrective.corrective_scores[index],
+                _scores(
+                    corrective.corrective_query, corrective.corrective_key, start, stop
+                ),
                 batch.corrective_parents[start:stop],
             )
         )

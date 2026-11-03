@@ -4,13 +4,14 @@ from dataclasses import dataclass
 
 import torch
 from torch import Tensor, nn
+from torch.nn.attention.flex_attention import BlockMask
+
+from letree.model.attention import same_graph_block_mask
 
 
 @dataclass(frozen=True)
 class ObservedStep:
     hidden_state: Tensor
-    parent_scores: tuple[Tensor, ...]
-    parent_probabilities: tuple[Tensor, ...]
     parent_message: Tensor
     parent_query: Tensor
     parent_key: Tensor
@@ -42,14 +43,21 @@ class RGNN(nn.Module):
             raise ValueError("steps must be positive.")
 
         static_embedding = self.encoder(node_features)
-
-        return self._run_steps(static_embedding, edge_index, graph_ptr, steps)
+        block_mask = (
+            same_graph_block_mask(graph_ptr)
+            if self.parent_head.attention == "flex"
+            else None
+        )
+        return self._run_steps(
+            static_embedding, edge_index, graph_ptr, block_mask, steps
+        )
 
     def _run_steps(
         self,
         static_embedding: Tensor,
         edge_index: Tensor,
         graph_ptr: Tensor,
+        block_mask: BlockMask | None,
         steps: int,
     ) -> tuple[ObservedStep, ...]:
         # Start without a hidden state or an initial parent guess
@@ -64,14 +72,12 @@ class RGNN(nn.Module):
                 edge_index,
                 parent_message,
             )
-            parent_output = self.parent_head(hidden_state, graph_ptr)
+            parent_output = self.parent_head(hidden_state, graph_ptr, block_mask)
 
             parent_message = parent_output.parent_message
             outputs.append(
                 ObservedStep(
                     hidden_state=hidden_state,
-                    parent_scores=parent_output.scores,
-                    parent_probabilities=parent_output.probabilities,
                     parent_message=parent_message,
                     parent_query=parent_output.query,
                     parent_key=parent_output.key,

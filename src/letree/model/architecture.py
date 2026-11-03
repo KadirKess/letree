@@ -50,12 +50,12 @@ def _validate_hidden_width(hidden_width: int) -> None:
         raise ValueError("hidden_width must be positive.")
 
 
-def build_rgnn(config: RGNNConfig = RGNNConfig()) -> RGNN:
+def build_rgnn(config: RGNNConfig = RGNNConfig(), attention: str = "dense") -> RGNN:
     _validate_hidden_width(config.hidden_width)
     return RGNN(
         encoder=NodeEncoder(len(STATIC_FEATURE_NAMES), config.hidden_width),
         recurrent_processor=RecurrentRagProcessor(config.hidden_width),
-        parent_head=AllNodeParentHead(config.hidden_width),
+        parent_head=AllNodeParentHead(config.hidden_width, attention),
     )
 
 
@@ -98,12 +98,13 @@ class CorrectionModelConfig:
 
 def build_correction_model(
     config: CorrectionModelConfig = CorrectionModelConfig(),
+    attention: str = "dense",
 ) -> CorrectionModel:
     _validate_recurrence_flag(config.correction_recurrent)
-    observed_model = build_rgnn(RGNNConfig(config.hidden_width))
+    observed_model = build_rgnn(RGNNConfig(config.hidden_width), attention)
     return CorrectionModel(
         observed_model=observed_model,
-        corrective_parent_head=AllNodeParentHead(config.hidden_width),
+        corrective_parent_head=AllNodeParentHead(config.hidden_width, attention),
         action_head=MergeDepthHead(config.hidden_width),
         corrective_processor=RecurrentRagProcessor(config.hidden_width)
         if config.correction_recurrent

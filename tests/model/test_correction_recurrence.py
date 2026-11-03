@@ -41,7 +41,8 @@ def _direct_readout(model, hidden):
         @ action.output_layer.weight.T
         + action.output_layer.bias
     )
-    return scores, probabilities, message, logits
+    log_normalizers = torch.cat([torch.logsumexp(score, dim=1) for score in scores])
+    return query, key, log_normalizers, message, logits
 
 
 def _direct_update(model, hidden, embedding, message, edges):
@@ -86,16 +87,13 @@ def test_corrective_updates_match_independent_equations(
     assert len(output.observed_steps) == observed_steps
     assert len(output.correction_steps) == correction_steps + 1
     for index, actual in enumerate(output.correction_steps):
-        scores, probabilities, message, logits = _direct_readout(model, hidden)
+        query, key, log_normalizers, message, logits = _direct_readout(model, hidden)
         torch.testing.assert_close(actual.hidden_state, hidden)
         torch.testing.assert_close(actual.expected_destination_state, message)
         torch.testing.assert_close(actual.action_logits, logits)
-        for field, expected in [
-            (actual.corrective_scores, scores),
-            (actual.corrective_probabilities, probabilities),
-        ]:
-            for a, e in zip(field, expected, strict=True):
-                torch.testing.assert_close(a, e)
+        torch.testing.assert_close(actual.corrective_query, query)
+        torch.testing.assert_close(actual.corrective_key, key)
+        torch.testing.assert_close(actual.corrective_log_normalizers, log_normalizers)
         if index < correction_steps:
             hidden = _direct_update(model, hidden, embedding, message, edges)
 
@@ -199,7 +197,7 @@ def test_later_predictions_depend_on_earlier_soft_messages_but_not_actions():
     output = model(features, edges, ptr, 2, 2)
     first = output.correction_steps[0]
     final = output.correction_steps[-1]
-    loss = final.corrective_scores[0].square().sum()
+    loss = final.corrective_log_normalizers[:3].square().sum()
     parameters = [
         parameter
         for name, parameter in model.named_parameters()
@@ -209,7 +207,7 @@ def test_later_predictions_depend_on_earlier_soft_messages_but_not_actions():
         loss,
         (
             first.expected_destination_state,
-            first.corrective_probabilities[0],
+            first.corrective_query,
             first.action_logits,
             *parameters,
         ),
@@ -234,24 +232,29 @@ def test_later_predictions_depend_on_earlier_soft_messages_but_not_actions():
         torch.testing.assert_close(
             original.hidden_state, new.hidden_state, rtol=0, atol=0
         )
-        for a, b in zip(original.corrective_scores, new.corrective_scores, strict=True):
-            torch.testing.assert_close(a, b, rtol=0, atol=0)
+        torch.testing.assert_close(
+            original.corrective_log_normalizers,
+            new.corrective_log_normalizers,
+            rtol=0,
+            atol=0,
+        )
 
 
 def test_disabled_mode_matches_the_previous_one_pass_execution():
     model = build_correction_model(CorrectionModelConfig(3)).double()
     features, edges, ptr = _inputs()
     observed = model.observed_model(features, edges, ptr, steps=2)
-    expected = model._read_correction(observed[-1].hidden_state, ptr)
+    expected = model._read_correction(observed[-1].hidden_state, ptr, None)
     actual = model(features, edges, ptr, 2, 0).correction_steps[0]
     assert model.corrective_processor is None
     for field in ("hidden_state", "expected_destination_state", "action_logits"):
         torch.testing.assert_close(
             getattr(actual, field), getattr(expected, field), rtol=0, atol=0
         )
-    for field in ("corrective_scores", "corrective_probabilities"):
-        for a, e in zip(getattr(actual, field), getattr(expected, field), strict=True):
-            torch.testing.assert_close(a, e, rtol=0, atol=0)
+    for field in ("corrective_query", "corrective_key", "corrective_log_normalizers"):
+        torch.testing.assert_close(
+            getattr(actual, field), getattr(expected, field), rtol=0, atol=0
+        )
 
 
 @pytest.mark.parametrize("observed_steps", [0, 2])
@@ -270,7 +273,10 @@ def test_recurrent_correction_remains_graph_local(observed_steps):
             before.hidden_state[:3], after.hidden_state[:3], rtol=0, atol=0
         )
         torch.testing.assert_close(
-            before.corrective_scores[0], after.corrective_scores[0], rtol=0, atol=0
+            before.corrective_log_normalizers[:3],
+            after.corrective_log_normalizers[:3],
+            rtol=0,
+            atol=0,
         )
         torch.testing.assert_close(
             before.action_logits[:3], after.action_logits[:3], rtol=0, atol=0

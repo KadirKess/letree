@@ -134,8 +134,11 @@ def test_one_step_agrees_with_independent_fixed_weight_calculation() -> None:
     expected_probabilities = torch.softmax(expected_scores, dim=1)
 
     torch.testing.assert_close(output.hidden_state, expected_hidden)
-    torch.testing.assert_close(output.parent_scores[0], expected_scores)
-    torch.testing.assert_close(output.parent_probabilities[0], expected_probabilities)
+    torch.testing.assert_close(output.parent_query, query)
+    torch.testing.assert_close(output.parent_key, key)
+    torch.testing.assert_close(
+        output.parent_log_normalizers, torch.logsumexp(expected_scores, dim=1)
+    )
     torch.testing.assert_close(
         output.parent_message,
         expected_probabilities @ expected_hidden,
@@ -171,14 +174,10 @@ class _RecordingProcessor(nn.Module):
 
 
 class _IdentityParentHead(nn.Module):
-    def forward(self, hidden_state, graph_ptr):
-        probabilities = []
-        for graph_index in range(graph_ptr.numel() - 1):
-            size = int(graph_ptr[graph_index + 1] - graph_ptr[graph_index])
-            probabilities.append(torch.eye(size, device=hidden_state.device))
+    attention = "dense"
+
+    def forward(self, hidden_state, graph_ptr, block_mask=None):
         return ParentAttentionOutput(
-            scores=tuple(probabilities),
-            probabilities=tuple(probabilities),
             parent_message=hidden_state,
             key=hidden_state,
             query=hidden_state,
@@ -231,14 +230,15 @@ def test_edge_reordering_does_not_change_recurrent_outputs() -> None:
             original_step.hidden_state, reordered_step.hidden_state
         )
         torch.testing.assert_close(
-            original_step.parent_scores[0], reordered_step.parent_scores[0]
+            original_step.parent_query, reordered_step.parent_query
         )
+        torch.testing.assert_close(original_step.parent_key, reordered_step.parent_key)
         torch.testing.assert_close(
             original_step.parent_message, reordered_step.parent_message
         )
 
 
-def test_heterogeneous_graph_shapes_and_probability_normalization() -> None:
+def test_heterogeneous_graph_shapes_and_single_candidate_graph() -> None:
     torch.manual_seed(12)
     model = build_rgnn(RGNNConfig(hidden_width=5))
 
@@ -251,13 +251,11 @@ def test_heterogeneous_graph_shapes_and_probability_normalization() -> None:
 
     assert output.hidden_state.shape == (4, 5)
     assert output.parent_message.shape == (4, 5)
-    assert [scores.shape for scores in output.parent_scores] == [(3, 3), (1, 1)]
-    for probabilities in output.parent_probabilities:
-        torch.testing.assert_close(
-            probabilities.sum(dim=1),
-            torch.ones(probabilities.shape[0]),
-        )
-    torch.testing.assert_close(output.parent_probabilities[1], torch.ones(1, 1))
+    assert output.parent_log_normalizers.shape == (4,)
+    # A one-node graph has itself as its only candidate, with probability one
+    query, key = output.parent_query[3], output.parent_key[3]
+    torch.testing.assert_close(output.parent_log_normalizers[3], query @ key / sqrt(5))
+    torch.testing.assert_close(output.parent_message[3], output.hidden_state[3])
 
 
 def test_gradients_reach_every_shared_module_through_recurrence() -> None:
@@ -271,7 +269,7 @@ def test_gradients_reach_every_shared_module_through_recurrence() -> None:
         torch.tensor([0, 3]),
         steps=3,
     )
-    loss = outputs[-1].parent_scores[0].square().sum()
+    loss = outputs[-1].parent_log_normalizers.square().sum()
     loss.backward()
 
     assert node_features.grad is not None
@@ -369,30 +367,21 @@ def test_three_steps_and_gradients_match_independent_gru_equations() -> None:
                 )
             ]
         )
-        expected.append((hidden, scores, probabilities, message))
+        log_normalizers = torch.cat([torch.logsumexp(score, dim=1) for score in scores])
+        expected.append((hidden, log_normalizers, message))
 
-    for actual_step, (hidden, scores, probabilities, message) in zip(
+    for actual_step, (hidden, log_normalizers, message) in zip(
         actual, expected, strict=True
     ):
         torch.testing.assert_close(actual_step.hidden_state, hidden)
         torch.testing.assert_close(actual_step.parent_message, message)
-        for actual_scores, expected_scores in zip(
-            actual_step.parent_scores, scores, strict=True
-        ):
-            torch.testing.assert_close(actual_scores, expected_scores)
-        for actual_probabilities, expected_probabilities in zip(
-            actual_step.parent_probabilities, probabilities, strict=True
-        ):
-            torch.testing.assert_close(actual_probabilities, expected_probabilities)
+        torch.testing.assert_close(actual_step.parent_log_normalizers, log_normalizers)
 
     actual_loss = (
-        sum(score.square().sum() for score in actual[-1].parent_scores)
+        actual[-1].parent_log_normalizers.square().sum()
         + actual[-1].parent_message.square().sum()
     )
-    expected_loss = (
-        sum(score.square().sum() for score in expected[-1][1])
-        + expected[-1][3].square().sum()
-    )
+    expected_loss = expected[-1][1].square().sum() + expected[-1][2].square().sum()
     inputs = (features, *model.parameters())
     actual_gradients = torch.autograd.grad(actual_loss, inputs, retain_graph=True)
     expected_gradients = torch.autograd.grad(expected_loss, inputs)
