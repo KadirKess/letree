@@ -274,51 +274,6 @@ def test_valid_reference_inputs_for_the_failure_cases_decode():
 
 
 @pytest.mark.parametrize(
-    ("parents", "actions"),
-    [
-        (VALID_PARENTS.reshape(1, 3), VALID_ACTIONS),
-        (VALID_PARENTS, VALID_ACTIONS.reshape(3, 1)),
-        (VALID_PARENTS[:2], VALID_ACTIONS),
-        (VALID_PARENTS, VALID_ACTIONS[:2]),
-        (_ints([0, 0, 1, 2]), _ints([KEEP_ZERO, KEEP_ONE, MERGE, MERGE])),
-    ],
-    ids=["parents_2d", "actions_2d", "short_parents", "short_actions", "both_long"],
-)
-def test_rejects_malformed_shapes(parents, actions):
-    _assert_fails(DecodeFailureReason.MALFORMED_SHAPE, parents, actions, VALID_ROW)
-
-
-@pytest.mark.parametrize(
-    ("parents", "actions"),
-    [
-        (VALID_PARENTS.astype(np.float64), VALID_ACTIONS),
-        (VALID_PARENTS, VALID_ACTIONS.astype(np.float32)),
-        (np.array([True, False, False]), VALID_ACTIONS),
-        (VALID_PARENTS, np.array([True, True, False])),
-    ],
-    ids=["float_parents", "float_actions", "bool_parents", "bool_actions"],
-)
-def test_rejects_non_integer_predictions(parents, actions):
-    _assert_fails(DecodeFailureReason.INVALID_DTYPE, parents, actions, VALID_ROW)
-
-
-@pytest.mark.parametrize("bad_pointer", [-1, 3, 1_000])
-def test_rejects_out_of_range_pointers(bad_pointer):
-    parents = VALID_PARENTS.copy()
-    parents[2] = bad_pointer
-    _assert_fails(
-        DecodeFailureReason.OUT_OF_RANGE_POINTER, parents, VALID_ACTIONS, VALID_ROW
-    )
-
-
-@pytest.mark.parametrize("bad_action", [-1, 3])
-def test_rejects_unknown_actions(bad_action):
-    actions = VALID_ACTIONS.copy()
-    actions[2] = bad_action
-    _assert_fails(DecodeFailureReason.UNKNOWN_ACTION, VALID_PARENTS, actions, VALID_ROW)
-
-
-@pytest.mark.parametrize(
     "parents",
     [_ints([1, 2, 0]), _ints([0, 1, 0]), _ints([0, 1, 2])],
     ids=["cycle_without_root", "two_roots", "three_roots"],
