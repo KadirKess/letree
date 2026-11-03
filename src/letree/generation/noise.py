@@ -7,13 +7,13 @@ from numpy.typing import NDArray
 
 @dataclass(frozen=True)
 class SaltAndPepperNoise:
-    probability: float = 0.01
+    probability: float = 0.05
     salt_fraction: float = 0.5
 
 
 @dataclass(frozen=True)
 class AdditiveGaussianNoise:
-    standard_deviation: float = 25.0
+    standard_deviation: float = 15.0
     mean: float = 0.0
 
 
@@ -24,7 +24,7 @@ class SpeckleNoise:
 
 @dataclass(frozen=True)
 class PoissonNoise:
-    peak: float = 30.0
+    peak: float = 150.0
 
 
 type NoiseConfig = (
