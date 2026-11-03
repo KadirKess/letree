@@ -74,22 +74,34 @@ def batch_image_metrics(output: Output, data: Batch) -> dict[str, Tensor]:
         "observed_ties": count(observed_tied),
         "corrective_ties": count(corrective_tied),
         "node_count": data.ptr.diff(),
-        "is_clean": data.is_clean,
     }
 
 
-def summarize_image_metrics(per_image: dict[str, list[Tensor]]) -> dict[str, float]:
-    """Image mean and node-pooled value of each quantity, overall, clean and noisy."""
-    values = {name: torch.cat(batches) for name, batches in per_image.items()}
-    node_count = values["node_count"].double()
-    is_clean = values["is_clean"]
+def summarize_image_metrics(per_image: dict[str, list]) -> dict[str, float]:
+    """Image mean and node-pooled value of each quantity per group of images.
 
+    The groups are all images, clean ones, noisy ones and each noise kind, read
+    from the corruption names that come with the per-image values.
+    """
+    corruption = [name for batch in per_image["corruption"] for name in batch]
+    values = {
+        name: torch.cat(batches)
+        for name, batches in per_image.items()
+        if name != "corruption"
+    }
+    node_count = values["node_count"].double()
+
+    def images_of(*kinds):
+        return torch.tensor([name in kinds for name in corruption])
+
+    noise_kinds = sorted(set(corruption) - {"clean"})
+    groups = [
+        ("all", torch.ones(len(corruption), dtype=torch.bool)),
+        ("clean", images_of("clean")),
+        ("noisy", images_of(*noise_kinds)),
+        *[(kind, images_of(kind)) for kind in noise_kinds],
+    ]
     summary = {}
-    groups = (
-        ("all", torch.ones_like(is_clean)),
-        ("clean", is_clean),
-        ("noisy", ~is_clean),
-    )
     for group, mask in groups:
         if not mask.any():
             continue

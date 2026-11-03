@@ -123,6 +123,8 @@ def evaluate(model, loader, settings, device) -> dict[str, float]:
 
         for name, value in batch_image_metrics(output, data).items():
             per_image[name].append(value.cpu())
+        # PyG collates the string corruption names into a list per batch
+        per_image["corruption"].append(data.corruption)
 
     summary = summarize_image_metrics(per_image)
     for name, total in loss_totals.items():

@@ -77,7 +77,6 @@ class ObservationDataset(Dataset):
     def __getitem__(self, item: int) -> Graph:
         observation = load_observation(*self.items[item])
         graph = to_graph(observation.tree_image, observation.targets)
-        graph.is_clean = torch.tensor(observation.noise == "clean")
         graph.corruption = observation.noise
         return graph
 

@@ -4,10 +4,24 @@ import pytest
 import torch
 from torch_geometric.data import Batch
 
-from letree.data.graphs import to_graph
+from letree.data.graphs import ObservationDataset, make_loader, to_graph
 from letree.experiments.losses import correction_losses
-from letree.experiments.train import SELECTION_METRIC, RunSettings, epoch_report, fit
-from letree.generation import SaltAndPepperNoise, SquareImageConfig
+from letree.experiments.train import (
+    SELECTION_METRIC,
+    RunSettings,
+    build_model,
+    epoch_report,
+    evaluate,
+    fit,
+)
+from letree.generation import (
+    NOISE_KIND_NAMES,
+    AdditiveGaussianNoise,
+    PoissonNoise,
+    SaltAndPepperNoise,
+    SpeckleNoise,
+    SquareImageConfig,
+)
 from letree.model import LetreeModel
 
 SMALL_IMAGES = SquareImageConfig(
@@ -76,6 +90,33 @@ def test_fit_writes_run_records_and_resumes(dataset_root, tmp_path) -> None:
         "best.pt",
         "last.pt",
     }
+
+
+def test_validation_reports_every_noise_kind_on_the_same_images(make_dataset):
+    noises = (
+        SaltAndPepperNoise(probability=0.05),
+        AdditiveGaussianNoise(standard_deviation=10.0),
+        SpeckleNoise(),
+        PoissonNoise(),
+    )
+    root = make_dataset({"val": 3}, noises, 4, base_seed=5)
+    settings = _settings(root, 1)
+    torch.manual_seed(0)
+    model = build_model(settings)
+    loader = make_loader(ObservationDataset(root, "val", True), 4, False, 0)
+
+    summary = evaluate(model, loader, settings, torch.device("cpu"))
+
+    kinds = [NOISE_KIND_NAMES[type(noise)] for noise in noises]
+    assert [summary[f"{kind}/images"] for kind in kinds] == [3, 3, 3, 3]
+    assert summary["clean/images"] == 3
+    assert summary["noisy/images"] == 12
+    assert sum(summary[f"{kind}/nodes"] for kind in kinds) == summary["noisy/nodes"]
+    # The noisy image mean is the mean of equally sized kinds
+    joint = "joint_correction_accuracy/image_mean"
+    assert summary[f"noisy/{joint}"] == pytest.approx(
+        sum(summary[f"{kind}/{joint}"] for kind in kinds) / 4
+    )
 
 
 def _history_entry(epoch, score, groups=("clean", "noisy")):

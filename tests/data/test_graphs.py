@@ -323,7 +323,7 @@ def test_main_run_serves_clean_then_noisy_observations(dataset_root) -> None:
 
     assert _items(dataset) == [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]
     batch = next(iter(make_loader(dataset, 6, shuffle=False, seed=0)))
-    assert batch.is_clean.tolist() == [True, False, False, True, False, False]
+    assert batch.corruption == ["clean", *["salt_and_pepper"] * 2] * 2
     assert batch.num_graphs == 6
 
 
@@ -331,7 +331,7 @@ def test_clean_only_control_serves_no_noisy_observation(dataset_root) -> None:
     dataset = ObservationDataset(dataset_root, "train", include_noisy=False)
 
     assert _items(dataset) == [(0, 0), (1, 0)]
-    assert all(bool(dataset[i].is_clean) for i in range(len(dataset)))
+    assert all(dataset[i].corruption == "clean" for i in range(len(dataset)))
 
 
 def test_empty_split_is_rejected(dataset_root) -> None:
@@ -367,7 +367,6 @@ def test_mixed_dataset_serves_every_noise_kind_of_each_family(mixed_root) -> Non
         "poisson",
         "salt_and_pepper",
     ]
-    assert batch.is_clean.tolist() == [True, False, False, False, False] * 2
 
 
 def test_clean_only_control_on_a_mixed_dataset(mixed_root) -> None:

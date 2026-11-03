@@ -22,7 +22,7 @@ def test_argmax_returns_local_ids_and_first_index_on_ties() -> None:
     assert tied.tolist() == [False, False, True, True, False]
 
 
-def _metric_batch(values, node_counts, clean):
+def _metric_batch(values, node_counts, corruption):
     names = (
         "observed_parent_accuracy",
         "corrective_parent_accuracy",
@@ -35,14 +35,17 @@ def _metric_batch(values, node_counts, clean):
     batch["observed_ties"] = torch.zeros(len(values), dtype=torch.long)
     batch["corrective_ties"] = torch.zeros(len(values), dtype=torch.long)
     batch["node_count"] = torch.tensor(node_counts)
-    batch["is_clean"] = torch.tensor(clean)
+    batch["corruption"] = corruption
     return batch
 
 
 def test_summary_reports_image_mean_and_pooled_over_unequal_batches() -> None:
     # Graph A has 2 nodes and half correct. Graph B, alone in a smaller final
     # batch, has 3 nodes all correct.
-    batches = [_metric_batch([0.5], [2], [True]), _metric_batch([1.0], [3], [False])]
+    batches = [
+        _metric_batch([0.5], [2], ["clean"]),
+        _metric_batch([1.0], [3], ["salt_and_pepper"]),
+    ]
     per_image = {name: [b[name] for b in batches] for name in batches[0]}
 
     summary = summarize_image_metrics(per_image)
@@ -56,13 +59,51 @@ def test_summary_reports_image_mean_and_pooled_over_unequal_batches() -> None:
 
 def test_clean_only_summary_has_no_noisy_group() -> None:
     per_image = {
-        name: [value] for name, value in _metric_batch([1.0], [4], [True]).items()
+        name: [value] for name, value in _metric_batch([1.0], [4], ["clean"]).items()
     }
 
     summary = summarize_image_metrics(per_image)
 
     assert "clean/action_accuracy/image_mean" in summary
-    assert not any(name.startswith("noisy/") for name in summary)
+    assert {name.split("/")[0] for name in summary} == {"all", "clean"}
+
+
+def test_summary_reports_each_noise_kind_and_pools_them_as_noisy() -> None:
+    # Clean A has 2 nodes and half correct. Salt-and-pepper B has 4 nodes all
+    # correct and D, in the next batch, 1 node wrong. Gaussian C has 2 nodes wrong.
+    batches = [
+        _metric_batch(
+            [0.5, 1.0, 0.0],
+            [2, 4, 2],
+            ["clean", "salt_and_pepper", "additive_gaussian"],
+        ),
+        _metric_batch([0.0], [1], ["salt_and_pepper"]),
+    ]
+    per_image = {name: [b[name] for b in batches] for name in batches[0]}
+
+    summary = summarize_image_metrics(per_image)
+
+    accuracy = "corrective_parent_accuracy"
+    assert summary[f"salt_and_pepper/{accuracy}/image_mean"] == pytest.approx(0.5)
+    assert summary[f"salt_and_pepper/{accuracy}/pooled"] == pytest.approx(0.8)
+    assert (summary["salt_and_pepper/images"], summary["salt_and_pepper/nodes"]) == (
+        2,
+        5,
+    )
+    assert summary[f"additive_gaussian/{accuracy}/image_mean"] == pytest.approx(0.0)
+    assert summary["additive_gaussian/images"] == 1
+    assert summary[f"noisy/{accuracy}/image_mean"] == pytest.approx(1 / 3)
+    assert summary[f"noisy/{accuracy}/pooled"] == pytest.approx(4 / 7)
+    assert summary["noisy/images"] == 3
+    assert summary[f"clean/{accuracy}/image_mean"] == pytest.approx(0.5)
+    # Kinds absent from the split get no entries
+    assert {name.split("/")[0] for name in summary} == {
+        "all",
+        "clean",
+        "noisy",
+        "salt_and_pepper",
+        "additive_gaussian",
+    }
 
 
 def test_joint_accuracy_needs_parent_and_action_right_on_the_same_node() -> None:
@@ -81,7 +122,6 @@ def test_joint_accuracy_needs_parent_and_action_right_on_the_same_node() -> None
         observed_parents=torch.tensor([0, 1, 2]),
         corrective_parents=torch.tensor([0, 1, 0]),
         correction_actions=torch.tensor([0, 2, 1]),
-        is_clean=torch.tensor([False]),
     )
 
     metrics = batch_image_metrics(output, data)
@@ -110,7 +150,6 @@ def test_baselines_on_a_clean_observation() -> None:
         observed_parents=parents,
         corrective_parents=parents,
         correction_actions=actions,
-        is_clean=torch.tensor([True]),
     )
 
     metrics = batch_image_metrics(output, data)
