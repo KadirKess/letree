@@ -57,9 +57,14 @@ def build_family(
     sample_index: int,
     kind: ComponentTreeKind,
     noise_configs: tuple[NoiseConfig, ...],
-    realization_count: int,
+    noisy_count: int,
 ) -> list[Observation]:
-    """The clean observation, then each noise kind's realizations in order."""
+    """The clean observation, then noisy_count observations with kinds in rotation.
+
+    Observation j uses kind (sample_index + j) mod k among the k noise kinds, so
+    consecutive images start one kind later and every kind gets the same share
+    of a split. A kind drawn again on one image gets the next realization.
+    """
     # Two configurations of one kind would read the same stream
     kinds = [type(noise_config) for noise_config in noise_configs]
     if len(set(kinds)) != len(kinds):
@@ -75,22 +80,25 @@ def build_family(
             clean.correction_diagnostics,
         )
     ]
-    for noise_config in noise_configs:
-        stage = NOISE_STAGES[type(noise_config)]
-        for realization in range(realization_count):
-            rng = derive_rng(
-                base_seed, sample_index, stage, realization_index=realization
+    for j in range(noisy_count):
+        noise_config = noise_configs[(sample_index + j) % len(noise_configs)]
+        realization = j // len(noise_configs)
+        rng = derive_rng(
+            base_seed,
+            sample_index,
+            NOISE_STAGES[type(noise_config)],
+            realization_index=realization,
+        )
+        sample = build_generation_sample(clean_image, kind, noise_config, rng)
+        family.append(
+            Observation(
+                NOISE_KIND_NAMES[type(noise_config)],
+                realization,
+                sample.observed,
+                sample.correction_targets,
+                sample.correction_diagnostics,
             )
-            sample = build_generation_sample(clean_image, kind, noise_config, rng)
-            family.append(
-                Observation(
-                    NOISE_KIND_NAMES[type(noise_config)],
-                    realization,
-                    sample.observed,
-                    sample.correction_targets,
-                    sample.correction_diagnostics,
-                )
-            )
+        )
     return family
 
 
@@ -218,10 +226,13 @@ def generate_dataset(
     base_seed: int,
     kind: ComponentTreeKind,
     noise_configs: tuple[NoiseConfig, ...],
-    realization_count: int,
+    noisy_counts: dict[str, int],
     workers: int = 1,
 ) -> None:
-    """Build one family per clean image of a source folder, keeping its splits."""
+    """Build one family per clean image of a source folder, keeping its splits.
+
+    noisy_counts gives the number of noisy observations per image in each split.
+    """
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     manifest_path = root / "manifest.json"
@@ -231,7 +242,13 @@ def generate_dataset(
     # An image's position in the source fixes its noise streams, so the same
     # source and seed always give the same families
     images = source_images(source)
-    jobs = [(split, index, path) for index, (split, path) in enumerate(images)]
+    missing = {split for split, _ in images} - set(noisy_counts)
+    if missing:
+        raise ValueError(f"No noisy count given for splits {sorted(missing)}.")
+    jobs = [
+        (split, index, path, noisy_counts[split])
+        for index, (split, path) in enumerate(images)
+    ]
     split_counts = {}
     for split, _ in images:
         split_counts[split] = split_counts.get(split, 0) + 1
@@ -245,16 +262,14 @@ def generate_dataset(
         "noise_configs": {
             NOISE_KIND_NAMES[type(config)]: asdict(config) for config in noise_configs
         },
-        "realization_count": realization_count,
+        "noisy_counts": noisy_counts,
         "split_sample_counts": split_counts,
         "source": json.loads((Path(source) / "source.json").read_text()),
     }
     manifest_path.write_text(json.dumps(manifest, indent=2))
 
     # Families have their own streams and files, so workers can write them in any order
-    write = partial(
-        _write_family, root, base_seed, kind, noise_configs, realization_count
-    )
+    write = partial(_write_family, root, base_seed, kind, noise_configs)
     progress = tqdm(total=len(jobs), desc="families", mininterval=5)
     if workers == 1:
         for job in jobs:
@@ -267,14 +282,9 @@ def generate_dataset(
     progress.close()
 
 
-def _write_family(root, base_seed, kind, noise_configs, realization_count, job) -> None:
-    split, sample_index, path = job
+def _write_family(root, base_seed, kind, noise_configs, job) -> None:
+    split, sample_index, path, noisy_count = job
     family = build_family(
-        read_image(path),
-        base_seed,
-        sample_index,
-        kind,
-        noise_configs,
-        realization_count,
+        read_image(path), base_seed, sample_index, kind, noise_configs, noisy_count
     )
     save_family(family_path(root, split, sample_index), family, path.name)

@@ -67,7 +67,7 @@ class ObservationDataset(Dataset):
         if not paths:
             raise ValueError(f"Split {split!r} of {root} contains no families.")
         manifest = json.loads((Path(root) / "manifest.json").read_text())
-        noisy_count = len(manifest["noise_configs"]) * manifest["realization_count"]
+        noisy_count = manifest["noisy_counts"][split]
         positions = range(1 + noisy_count) if include_noisy else [0]
         self.items = [(path, position) for path in paths for position in positions]
 

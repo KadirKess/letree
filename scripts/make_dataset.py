@@ -20,7 +20,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--noise", nargs="+", choices=NOISE_TYPES, default=list(NOISE_TYPES)
     )
-    parser.add_argument("--realizations", type=int, default=2)
+    parser.add_argument("--noisy", type=int, default=2)
     parser.add_argument(
         "--tree", choices=[kind.value for kind in ComponentTreeKind], default="max_tree"
     )
@@ -31,13 +31,17 @@ def parse_arguments() -> argparse.Namespace:
 
 def main() -> None:
     arguments = parse_arguments()
+    # Training images get a few kinds each, evaluation images every kind once,
+    # so each kind is scored on the same validation and test images
+    kind_count = len(arguments.noise)
+    noisy_counts = {"train": arguments.noisy, "val": kind_count, "test": kind_count}
     generate_dataset(
         arguments.dataset,
         arguments.source,
         arguments.base_seed,
         ComponentTreeKind(arguments.tree),
         tuple(NOISE_TYPES[name]() for name in arguments.noise),
-        arguments.realizations,
+        noisy_counts,
         arguments.workers,
     )
 

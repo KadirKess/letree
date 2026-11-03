@@ -44,15 +44,15 @@ def _family(
     sample_index=5,
     base_seed=3,
     noises=(NOISE,),
-    realizations=2,
+    noisy_count=2,
     kind=ComponentTreeKind.MAX_TREE,
 ):
     rng = derive_rng(base_seed, sample_index, GenerationStage.SQUARE_IMAGE)
     image = generate_square_image(SMALL_IMAGES, rng)
-    return build_family(image, base_seed, sample_index, kind, noises, realizations)
+    return build_family(image, base_seed, sample_index, kind, noises, noisy_count)
 
 
-def _square_dataset(directory, counts, noises=(NOISE,), realizations=2, **options):
+def _square_dataset(directory, counts, noises=(NOISE,), noisy_counts=None, **options):
     write_square_source(directory / "source", 3, counts, SMALL_IMAGES)
     generate_dataset(
         directory / "data",
@@ -60,7 +60,7 @@ def _square_dataset(directory, counts, noises=(NOISE,), realizations=2, **option
         3,
         options.get("kind", ComponentTreeKind.MAX_TREE),
         noises,
-        realizations,
+        noisy_counts or {split: 2 for split in counts},
         options.get("workers", 1),
     )
     return directory / "data"
@@ -93,17 +93,48 @@ def test_family_is_reproducible_from_its_seeds():
         _assert_observations_equal(a, b)
 
 
-def test_family_is_clean_then_each_kind_by_realization():
-    family = _family(noises=(NOISE, GAUSSIAN))
+def _kinds(family):
+    return [(o.noise, o.realization) for o in family]
 
-    assert [(o.noise, o.realization) for o in family] == [
+
+def test_family_is_clean_then_kinds_in_rotation_from_the_sample_index():
+    # Sample 5 among four kinds starts at kind 5 mod 4, the Gaussian one
+    assert _kinds(_family(noises=ALL_NOISES, noisy_count=2)) == [
+        ("clean", 0),
+        ("additive_gaussian", 0),
+        ("speckle", 0),
+    ]
+    assert _kinds(_family(noises=ALL_NOISES, noisy_count=6)) == [
+        ("clean", 0),
+        ("additive_gaussian", 0),
+        ("speckle", 0),
+        ("poisson", 0),
+        ("salt_and_pepper", 0),
+        ("additive_gaussian", 1),
+        ("speckle", 1),
+    ]
+    assert _kinds(_family(noises=ALL_NOISES, noisy_count=0)) == [("clean", 0)]
+
+
+def test_a_kind_drawn_twice_gets_a_new_realization():
+    family = _family(noises=(NOISE,), noisy_count=2)
+
+    assert _kinds(family) == [
         ("clean", 0),
         ("salt_and_pepper", 0),
         ("salt_and_pepper", 1),
-        ("additive_gaussian", 0),
-        ("additive_gaussian", 1),
     ]
     assert not np.array_equal(family[1].tree_image.image, family[2].tree_image.image)
+
+
+@pytest.mark.parametrize("noisy_count", [1, 2, 3])
+def test_consecutive_images_share_every_kind_equally(noisy_count):
+    # Over four consecutive images each kind is drawn noisy_count times
+    counts = {}
+    for sample_index in range(10, 14):
+        for o in _family(sample_index, noises=ALL_NOISES, noisy_count=noisy_count)[1:]:
+            counts[o.noise] = counts.get(o.noise, 0) + 1
+    assert counts == {NOISE_KIND_NAMES[type(n)]: noisy_count for n in ALL_NOISES}
 
 
 @pytest.mark.parametrize(
@@ -118,7 +149,7 @@ def test_family_is_clean_then_each_kind_by_realization():
 def test_each_observation_draws_from_its_kind_stream(noise, stage):
     # Rebuilt from the documented streams, not from the family builder, so the
     # single-noise datasets generated before mixing stay reproducible
-    family = _family(noises=ALL_NOISES)
+    family = _family(noises=ALL_NOISES, noisy_count=8)
     clean = generate_square_image(
         SMALL_IMAGES, derive_rng(3, 5, GenerationStage.SQUARE_IMAGE)
     )
@@ -135,7 +166,7 @@ def test_each_observation_draws_from_its_kind_stream(noise, stage):
 
 def test_adding_a_noise_kind_leaves_other_kinds_unchanged():
     alone = _family(noises=(GAUSSIAN,))
-    mixed = _family(noises=(NOISE, GAUSSIAN))
+    mixed = _family(noises=(NOISE, GAUSSIAN), noisy_count=4)
 
     mixed_gaussian = [o for o in mixed if o.noise == "additive_gaussian"]
     for a, b in zip(alone[1:], mixed_gaussian, strict=True):
@@ -150,7 +181,7 @@ def test_two_configurations_of_one_kind_are_rejected():
 
 @pytest.mark.parametrize("kind", list(ComponentTreeKind))
 def test_family_round_trip_is_exact(tmp_path, kind):
-    family = _family(noises=ALL_NOISES, kind=kind)
+    family = _family(noises=ALL_NOISES, noisy_count=8, kind=kind)
     path = tmp_path / "family.npz"
 
     save_family(path, family, "square.png")
@@ -214,7 +245,7 @@ def test_diagnostics_keep_their_clean_and_observed_scopes(tmp_path):
 
 
 def test_one_realization_index_may_repeat_across_noise_kinds():
-    check_family(_family(noises=(NOISE, GAUSSIAN), realizations=1))
+    check_family(_family(noises=(NOISE, GAUSSIAN), noisy_count=2))
 
 
 def test_a_repeated_realization_within_one_kind_is_rejected(tmp_path):
@@ -284,7 +315,7 @@ def test_manifest_records_the_dataset_and_its_source(tmp_path):
         "speckle",
         "poisson",
     ]
-    assert manifest["realization_count"] == 2
+    assert manifest["noisy_counts"] == {"train": 2}
     assert manifest["split_sample_counts"] == {"train": 1}
     assert manifest["source"]["source"] == "square_images"
     assert manifest["source"]["image_config"]["height"] == 16
@@ -302,8 +333,31 @@ def test_an_existing_source_or_dataset_is_never_overwritten(tmp_path):
             3,
             ComponentTreeKind.MAX_TREE,
             (NOISE,),
-            1,
+            {"train": 1},
         )
+
+
+def test_each_split_gets_its_own_noisy_count(tmp_path):
+    root = _square_dataset(
+        tmp_path,
+        {"train": 2, "val": 1},
+        ALL_NOISES,
+        noisy_counts={"train": 1, "val": 4},
+    )
+
+    assert _kinds(load_family(family_path(root, "train", 1))) == [
+        ("clean", 0),
+        ("additive_gaussian", 0),
+    ]
+    val = load_family(family_path(root, "val", 2))
+    assert sorted(o.noise for o in val[1:]) == sorted(
+        NOISE_KIND_NAMES[type(n)] for n in ALL_NOISES
+    )
+
+
+def test_a_split_without_a_noisy_count_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="val"):
+        _square_dataset(tmp_path, {"train": 1, "val": 1}, noisy_counts={"train": 1})
 
 
 def test_source_lists_splits_in_order_and_reads_exact_pixels(tmp_path):

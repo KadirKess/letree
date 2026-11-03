@@ -315,7 +315,7 @@ def mixed_root(make_dataset):
         SpeckleNoise(),
         PoissonNoise(),
     )
-    return make_dataset({"train": 2}, noises, 1, base_seed=7)
+    return make_dataset({"train": 2}, noises, 4, base_seed=7)
 
 
 def test_main_run_serves_clean_then_noisy_observations(dataset_root) -> None:
@@ -354,8 +354,19 @@ def test_mixed_dataset_serves_every_noise_kind_of_each_family(mixed_root) -> Non
 
     assert _items(dataset) == [(i, p) for i in range(2) for p in range(5)]
     batch = next(iter(make_loader(dataset, 10, shuffle=False, seed=0)))
-    kinds = ["clean", "salt_and_pepper", "additive_gaussian", "speckle", "poisson"]
-    assert batch.corruption == kinds * 2
+    # The second family starts the rotation one kind later
+    assert batch.corruption == [
+        "clean",
+        "salt_and_pepper",
+        "additive_gaussian",
+        "speckle",
+        "poisson",
+        "clean",
+        "additive_gaussian",
+        "speckle",
+        "poisson",
+        "salt_and_pepper",
+    ]
     assert batch.is_clean.tolist() == [True, False, False, False, False] * 2
 
 
