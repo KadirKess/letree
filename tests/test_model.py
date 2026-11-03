@@ -59,8 +59,17 @@ def _update(gru, aggregations, hidden, embedding, message, edges):
     return _gru(gru, inputs, hidden)
 
 
-def _readout(query_layer, key_layer, hidden, bounds):
-    query, key = _linear(query_layer, hidden), _linear(key_layer, hidden)
+def _normalized_projection(layers, values):
+    linear, norm = layers
+    projected = _linear(linear, values)
+    centred = projected - projected.mean(dim=1, keepdim=True)
+    variance = centred.square().mean(dim=1, keepdim=True)
+    return centred / torch.sqrt(variance + norm.eps) * norm.weight + norm.bias
+
+
+def _readout(query_layers, key_layers, hidden, bounds):
+    query = _normalized_projection(query_layers, hidden)
+    key = _normalized_projection(key_layers, hidden)
     messages, log_z = [], []
     for start, stop in bounds:
         scores = query[start:stop] @ key[start:stop].T / sqrt(hidden.shape[1])
@@ -169,10 +178,12 @@ def test_one_step_matches_a_hand_calculation():
         model.observed_gru.weight_hh.zero_()
         model.observed_gru.bias_ih.copy_(torch.tensor([0.1, -0.2, 0.05]))
         model.observed_gru.bias_hh.copy_(torch.tensor([0.2, 0.3, -0.1]))
-        model.observed_query.weight.fill_(1.5)
-        model.observed_query.bias.fill_(0.2)
-        model.observed_key.weight.fill_(-0.5)
-        model.observed_key.bias.fill_(0.4)
+        model.observed_query[0].weight.fill_(1.5)
+        model.observed_query[0].bias.fill_(0.2)
+        model.observed_query[1].bias.fill_(0.3)
+        model.observed_key[0].weight.fill_(-0.5)
+        model.observed_key[0].bias.fill_(0.4)
+        model.observed_key[1].bias.fill_(-2.0)
     features = torch.tensor([[0.2, 0.3, 0.1], [0.7, 0.1, 0.4]])
 
     step = model(
@@ -185,7 +196,9 @@ def test_one_step_matches_a_hand_calculation():
     update = torch.sigmoid(-0.3 * embedding - 0.2 + 0.3)
     candidate = torch.tanh(0.5 * embedding + 0.05 - 0.1 * reset)
     hidden = (1.0 - update) * candidate
-    scores = (1.5 * hidden + 0.2) @ (-0.5 * hidden + 0.4).T
+    # With one feature the normalisation leaves only its bias, so every score
+    # is 0.3 times -2
+    scores = torch.full((2, 2), -0.6)
     torch.testing.assert_close(step.hidden, hidden)
     torch.testing.assert_close(step.log_z, torch.logsumexp(scores, dim=1))
     torch.testing.assert_close(step.message, torch.softmax(scores, dim=1) @ hidden)
@@ -383,3 +396,21 @@ def test_tf32_attention_rounds_every_query_and_key():
     for step in output.observed + output.corrective:
         for values in (step.query, step.key):
             assert (values.view(torch.int32) & 0x1FFF).eq(0).all()
+
+
+def test_query_and_key_lengths_do_not_grow_with_their_weights():
+    torch.manual_seed(0)
+    model = LetreeModel(16)
+    features, edges, graph_ptr = _inputs()
+    with torch.no_grad():
+        for name in ("observed_query", "observed_key"):
+            getattr(model, name)[0].weight.mul_(1_000)
+
+    step = model(features.float(), edges, graph_ptr, 1).observed[0]
+
+    # Untrained normalisation gains are one and biases zero, so every length
+    # is the square root of the width
+    for values in (step.query, step.key):
+        torch.testing.assert_close(
+            values.norm(dim=1), torch.full((4,), 4.0), rtol=1e-3, atol=0
+        )

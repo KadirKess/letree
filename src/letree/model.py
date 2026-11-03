@@ -32,6 +32,10 @@ class Output:
     actions: list[Tensor]
 
 
+def normalized_projection(width: int) -> nn.Sequential:
+    return nn.Sequential(nn.Linear(width, width), nn.LayerNorm(width))
+
+
 class LetreeModel(nn.Module):
     def __init__(
         self,
@@ -51,13 +55,15 @@ class LetreeModel(nn.Module):
         gru_input = (2 + len(aggregations)) * width
         self.encoder = nn.Linear(FEATURE_COUNT, width)
         self.observed_gru = nn.GRUCell(gru_input, width)
-        self.observed_query = nn.Linear(width, width)
-        self.observed_key = nn.Linear(width, width)
+        # Normalised queries and keys keep the attention scores bounded. Without
+        # them the scores grew until training diverged
+        self.observed_query = normalized_projection(width)
+        self.observed_key = normalized_projection(width)
         self.corrective_gru = (
             nn.GRUCell(gru_input, width) if correction_recurrent else None
         )
-        self.corrective_query = nn.Linear(width, width)
-        self.corrective_key = nn.Linear(width, width)
+        self.corrective_query = normalized_projection(width)
+        self.corrective_key = normalized_projection(width)
         self.action_hidden = nn.Linear(2 * width, width)
         self.action_output = nn.Linear(width, 3)
 
