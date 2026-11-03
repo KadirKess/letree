@@ -37,9 +37,12 @@ src/letree/
     reference/      readable construction of the RAG and component tree
     higra/          Higra-based construction and conversion to node parents
   generation/       synthetic images, noise models, seeds and correction targets
-  dataset/          on-disk sample storage, manifests and validation
-  model/            graph adapter, recurrent network, parent and action heads
-  training/         losses, metrics, epoch loop and checkpointing
+  data/             clean image sources, stored families and PyG graphs
+  model.py          recurrent network with its parent and action readouts
+  attention.py      graph-local parent attention, dense and FlexAttention
+  losses.py         parent and action losses averaged per image
+  metrics.py        accuracies and baselines per image
+  train.py          epoch loop, checkpoint selection and test evaluation
   correction/       decoding predictions into the ε-tree and scoring it
 scripts/            dataset generation and training entry points
 notebooks/          Colab notebook that generates a dataset and trains
@@ -59,15 +62,17 @@ uv sync
 uv run pytest
 ```
 
-To generate a salt-and-pepper dataset and train on it:
+To write a source of clean square images, corrupt it with salt-and-pepper
+noise and train on the result:
 
 ```bash
-uv run python scripts/generate_preliminary_dataset.py dataset
+uv run python scripts/make_squares.py source
+uv run python scripts/make_dataset.py source dataset --noise salt_and_pepper
 uv run python scripts/train.py dataset run/main --max-epochs 100
 ```
 
 Training uses a CUDA GPU when one is available, then Apple's MPS backend, then
-the CPU. The Colab notebook runs the same two steps on a hosted GPU and keeps
+the CPU. The Colab notebook runs the same steps on a hosted GPU and keeps
 datasets and runs in a `letree` folder of Google Drive.
 
 ## License

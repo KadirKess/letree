@@ -823,6 +823,7 @@ source = { editable = "." }
 dependencies = [
     { name = "higra" },
     { name = "matplotlib" },
+    { name = "pillow" },
     { name = "scikit-image" },
     { name = "torch" },
     { name = "torch-geometric" },
@@ -841,6 +842,7 @@ dev = [
 requires-dist = [
     { name = "higra", specifier = ">=0.6.13" },
     { name = "matplotlib", specifier = ">=3.11.0" },
+    { name = "pillow", specifier = ">=12.0" },
     { name = "scikit-image", specifier = ">=0.26.0" },
     { name = "torch", specifier = ">=2.13.0" },
     { name = "torch-geometric", specifier = ">=2.8.0.post1" },

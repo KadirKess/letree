@@ -4,9 +4,7 @@ import pytest
 import torch
 from torch_geometric.data import Batch
 
-from letree.component_tree import ComponentTreeKind
-from letree.data import to_graph
-from letree.dataset.build import build_sample_family, generate_dataset
+from letree.data.graphs import to_graph
 from letree.generation import SaltAndPepperNoise, SquareImageConfig
 from letree.losses import correction_losses
 from letree.model import LetreeModel
@@ -18,13 +16,10 @@ SMALL_IMAGES = SquareImageConfig(
 NOISES = (SaltAndPepperNoise(probability=0.05),)
 
 
-def test_all_three_losses_fall_on_a_few_graphs() -> None:
+def test_all_three_losses_fall_on_a_few_graphs(square_family) -> None:
     # A learning check for target indexing and gradient flow, not learnability
-    family = build_sample_family(
-        1, 0, SMALL_IMAGES, ComponentTreeKind.MAX_TREE, NOISES, 2
-    )
-    samples = [family.clean, *(o.sample for o in family.noisy)]
-    batch = Batch.from_data_list([to_graph(s) for s in samples])
+    family = square_family(1, 0, NOISES, 2)
+    batch = Batch.from_data_list([to_graph(o.tree_image, o.targets) for o in family])
     torch.manual_seed(0)
     model = LetreeModel(16)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
@@ -45,18 +40,8 @@ def test_all_three_losses_fall_on_a_few_graphs() -> None:
 
 
 @pytest.fixture
-def dataset_root(tmp_path):
-    root = tmp_path / "data"
-    generate_dataset(
-        root,
-        2,
-        {"train": 3, "val": 1, "test": 1},
-        SMALL_IMAGES,
-        ComponentTreeKind.MAX_TREE,
-        NOISES,
-        2,
-    )
-    return root
+def dataset_root(make_dataset):
+    return make_dataset({"train": 3, "val": 1, "test": 1}, NOISES, 2, base_seed=2)
 
 
 def _settings(root, max_epochs):

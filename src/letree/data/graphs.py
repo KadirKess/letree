@@ -1,5 +1,6 @@
 """Stored observations served as PyG graphs."""
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -9,9 +10,9 @@ from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from torch_geometric.utils import add_remaining_self_loops, to_undirected
 
-from letree.dataset.store import NpzDataset
-from letree.generation.noise import NOISE_KIND_NAMES
-from letree.generation.samples import GenerationSample
+from letree.data.families import load_observation
+from letree.generation.samples import TreeImage
+from letree.generation.targets import CorrectionTargets
 
 
 class Graph(Data):
@@ -24,9 +25,9 @@ class Graph(Data):
         return super().__inc__(key, value, *args, **kwargs)
 
 
-def to_graph(sample: GenerationSample) -> Graph:
+def to_graph(tree_image: TreeImage, targets: CorrectionTargets) -> Graph:
     """Node features are level, area and anchor, each scaled to [0, 1]."""
-    graph = sample.observed.graph
+    graph = tree_image.graph
     pixel_count = graph.label_map.size
     features = np.column_stack(
         (
@@ -44,59 +45,40 @@ def to_graph(sample: GenerationSample) -> Graph:
         x=torch.as_tensor(features, dtype=torch.float32),
         edge_index=edge_index,
         observed_parents=torch.as_tensor(
-            sample.observed.component_tree.parents, dtype=torch.int64
+            tree_image.component_tree.parents, dtype=torch.int64
         ),
         corrective_parents=torch.as_tensor(
-            sample.correction_targets.corrective_parents, dtype=torch.int64
+            targets.corrective_parents, dtype=torch.int64
         ),
-        correction_actions=torch.as_tensor(
-            sample.correction_targets.actions, dtype=torch.int64
-        ),
+        correction_actions=torch.as_tensor(targets.actions, dtype=torch.int64),
         num_nodes=node_count,
     )
 
 
 class ObservationDataset(Dataset):
-    """One item per observation, loading its family file lazily.
+    """One item per observation, reading only that observation from its family file.
 
     Position zero is the clean observation of a family, and positions from one
     onward are its noisy observations in stored order.
     """
 
     def __init__(self, root: str | Path, split: str, include_noisy: bool) -> None:
-        self.dataset = NpzDataset.open(root)
-        self.split = split
-        sample_indices = sorted(
-            int(path.stem.removeprefix("sample_"))
-            for path in (Path(root) / split).glob("sample_*.npz")
-        )
-        if not sample_indices:
+        paths = sorted((Path(root) / split).glob("sample_*.npz"))
+        if not paths:
             raise ValueError(f"Split {split!r} of {root} contains no families.")
-
-        positions = [0]
-        if include_noisy:
-            noisy_count = len(self.dataset.load(split, sample_indices[0]).noisy)
-            positions += range(1, noisy_count + 1)
-        self.items = [
-            (index, position) for index in sample_indices for position in positions
-        ]
+        manifest = json.loads((Path(root) / "manifest.json").read_text())
+        noisy_count = len(manifest["noise_configs"]) * manifest["realization_count"]
+        positions = range(1 + noisy_count) if include_noisy else [0]
+        self.items = [(path, position) for path in paths for position in positions]
 
     def __len__(self) -> int:
         return len(self.items)
 
     def __getitem__(self, item: int) -> Graph:
-        sample_index, position = self.items[item]
-        family = self.dataset.load(self.split, sample_index)
-        if position == 0:
-            sample, corruption = family.clean, "clean"
-        else:
-            observation = family.noisy[position - 1]
-            sample = observation.sample
-            corruption = NOISE_KIND_NAMES[type(observation.noise_config)]
-
-        graph = to_graph(sample)
-        graph.is_clean = torch.tensor(position == 0)
-        graph.corruption = corruption
+        observation = load_observation(*self.items[item])
+        graph = to_graph(observation.tree_image, observation.targets)
+        graph.is_clean = torch.tensor(observation.noise == "clean")
+        graph.corruption = observation.noise
         return graph
 
 

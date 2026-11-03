@@ -6,9 +6,7 @@ import torch
 from torch.nn import functional as F
 from torch_geometric.data import Batch
 
-from letree.component_tree import ComponentTreeKind
-from letree.data import to_graph
-from letree.dataset.build import build_sample_family
+from letree.data.graphs import to_graph
 from letree.generation import SaltAndPepperNoise, SquareImageConfig
 from letree.losses import correction_losses, image_mean, parent_cross_entropy
 from letree.model import LetreeModel, Step
@@ -43,20 +41,11 @@ def test_image_mean_weights_images_equally() -> None:
 
 
 @pytest.fixture(scope="module")
-def graphs():
+def graphs(square_family):
     families = [
-        build_sample_family(
-            3,
-            index,
-            SMALL_IMAGES,
-            ComponentTreeKind.MAX_TREE,
-            (SaltAndPepperNoise(0.05),),
-            2,
-        )
-        for index in range(2)
+        square_family(3, index, (SaltAndPepperNoise(0.05),), 2) for index in range(2)
     ]
-    samples = [s for f in families for s in (f.clean, *(o.sample for o in f.noisy))]
-    graphs = [to_graph(sample) for sample in samples]
+    graphs = [to_graph(o.tree_image, o.targets) for f in families for o in f]
     for graph in graphs:
         graph.x = graph.x.double()
     return graphs
