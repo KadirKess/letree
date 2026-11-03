@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from torch.nn import functional as F
+from torch.nn.attention.flex_attention import create_block_mask
 
 from letree.attention import (
     flex_graph_attention,
@@ -146,6 +147,37 @@ def test_flex_gradients_match_dense_on_cuda():
     actual = gradients(flex_graph_attention, same_graph_block_mask(graph_ptr))
     for a, e in zip(actual, expected, strict=True):
         torch.testing.assert_close(a, e, rtol=1e-4, atol=1e-5)
+
+
+@cuda
+def test_block_mask_of_a_large_batch_never_needs_n_by_n_memory():
+    # 16 graphs and 46,000 nodes, the size of the largest mixed 64 by 64 batches.
+    # One byte per node pair would already be about 2 GiB.
+    graph_ptr = torch.arange(0, 46_001, 2_875, device="cuda")
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    before = torch.cuda.memory_allocated()
+
+    same_graph_block_mask(graph_ptr)
+
+    torch.cuda.synchronize()
+    assert torch.cuda.max_memory_allocated() - before < 2**28
+
+
+@cuda
+def test_compiled_block_mask_matches_the_eager_one():
+    graph_ptr = torch.tensor([0, 1, 300, 301, 1_000, 2_500], device="cuda")
+    graph_ids = torch.repeat_interleave(
+        torch.arange(5, device="cuda"), graph_ptr.diff()
+    )
+
+    def same_graph(batch, head, query_index, key_index):
+        return graph_ids[query_index] == graph_ids[key_index]
+
+    expected = create_block_mask(same_graph, None, None, 2_500, 2_500, device="cuda")
+    actual = same_graph_block_mask(graph_ptr)
+
+    torch.testing.assert_close(actual.to_dense(), expected.to_dense())
 
 
 @cuda

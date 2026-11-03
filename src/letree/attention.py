@@ -46,8 +46,16 @@ def same_graph_block_mask(graph_ptr: Tensor) -> BlockMask:
     def same_graph(batch, head, query_index, key_index):
         return graph_ids[query_index] == graph_ids[key_index]
 
+    # Uncompiled, the mask function runs on every node pair and needs n by n
+    # memory, which runs out on a GPU near 40,000 nodes
     return create_block_mask(
-        same_graph, None, None, node_count, node_count, device=graph_ptr.device
+        same_graph,
+        None,
+        None,
+        node_count,
+        node_count,
+        device=graph_ptr.device,
+        _compile=graph_ptr.is_cuda,
     )
 
 
