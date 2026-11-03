@@ -128,3 +128,18 @@ def test_epoch_report_of_a_clean_only_run_has_no_noisy_row() -> None:
 def test_epoch_report_without_a_finite_score() -> None:
     report = epoch_report([_history_entry(0, float("nan"))], stale=1, patience=10)
     assert "best none yet  stale 1/10" in report
+
+
+def test_resumed_run_matches_an_uninterrupted_one(
+    dataset_root, tmp_path, monkeypatch
+) -> None:
+    # GPU kernels such as scatter can be nondeterministic, so compare on the CPU
+    monkeypatch.setattr("letree.train.select_device", lambda: torch.device("cpu"))
+    fit(_settings(dataset_root, 2), tmp_path / "whole")
+    fit(_settings(dataset_root, 1), tmp_path / "split")
+    fit(_settings(dataset_root, 2), tmp_path / "split", resume=True)
+
+    whole = torch.load(tmp_path / "whole" / "last.pt")["model"]
+    split = torch.load(tmp_path / "split" / "last.pt")["model"]
+    for name, value in whole.items():
+        torch.testing.assert_close(split[name], value, rtol=0, atol=0, msg=name)

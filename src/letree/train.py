@@ -251,8 +251,6 @@ def fit(
 
     first_epoch, best, stale, history = 0, -inf, 0, []
     if resume and last_path.exists():
-        # A resumed run continues the schedule, but its shuffling order differs
-        # from an uninterrupted run
         state = torch.load(last_path, map_location=device)
         model.load_state_dict(state["model"])
         optimizer.load_state_dict(state["optimizer"])
@@ -278,6 +276,9 @@ def fit(
             break
 
         started = time.perf_counter()
+        # Each epoch's order depends only on its number, so a resumed run
+        # shuffles exactly like an uninterrupted one
+        train_loader.generator.manual_seed(settings.seed + epoch)
         train = train_epoch(model, train_loader, optimizer, settings, device)
         validation = evaluate(model, validation_loader, settings, device)
         score = validation[SELECTION_METRIC]
