@@ -42,7 +42,11 @@ def test_readable_attention_computes_independent_graph_blocks():
     )
 
 
-def _packed_inputs(device="cpu", dtype=torch.float64, width=8):
+# The CUDA Flex kernel needs at least 16 features per head
+WIDTH = 16
+
+
+def _packed_inputs(device="cpu", dtype=torch.float64, width=WIDTH):
     # Unequal graphs, a one-node graph and one longer than a 128-node tile
     generator = torch.Generator().manual_seed(3)
     graph_ptr = torch.tensor([0, 5, 6, 200, 333], device=device)
@@ -90,8 +94,8 @@ def test_flex_never_mixes_graphs():
 
 def _model_pair(device="cpu", dtype=torch.float64):
     torch.manual_seed(5)
-    dense = LetreeModel(8).to(dtype)
-    flex = LetreeModel(8, attention="flex").to(dtype)
+    dense = LetreeModel(WIDTH).to(dtype)
+    flex = LetreeModel(WIDTH, attention="flex").to(dtype)
     flex.load_state_dict(dense.state_dict(), strict=True)
     return dense.to(device), flex.to(device)
 
