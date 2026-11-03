@@ -14,18 +14,22 @@ def validate_sample_family(family: SampleFamily) -> None:
         raise ValueError("The clean family observation must equal its clean reference.")
     _validate_generation_sample(family.clean)
 
-    realization_indices = []
+    # Each noise kind numbers its realizations on its own stream, so an index
+    # only has to be unique within its kind
+    realizations = []
     for observation in family.noisy:
         validate_nonnegative_integer("realization_index", observation.realization_index)
-        realization_indices.append(observation.realization_index)
+        realizations.append(
+            (type(observation.noise_config), observation.realization_index)
+        )
         if not _same_tree_image(family.clean.clean, observation.sample.clean):
             raise ValueError(
                 "Each noisy observation must reference the family clean image."
             )
         _validate_generation_sample(observation.sample)
 
-    if len(set(realization_indices)) != len(realization_indices):
-        raise ValueError("Realization indices must be unique within a sample family.")
+    if len(set(realizations)) != len(realizations):
+        raise ValueError("Realization indices must be unique within a noise kind.")
 
 
 def validate_nonnegative_integer(name: str, value: int) -> None:

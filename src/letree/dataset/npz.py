@@ -14,24 +14,12 @@ from letree.dataset.records import (
     SampleFamily,
 )
 from letree.dataset.validation import validate_sample_family
-from letree.generation.noise import (
-    AdditiveGaussianNoise,
-    NoiseConfig,
-    PoissonNoise,
-    SaltAndPepperNoise,
-    SpeckleNoise,
-)
+from letree.generation.noise import NOISE_KIND_NAMES, NoiseConfig
 from letree.generation.samples import GenerationSample, TreeImage
 from letree.generation.targets import CorrectionDiagnostics, CorrectionTargets
 
 _NOISE_CONFIG_TYPES = {
-    "salt_and_pepper": SaltAndPepperNoise,
-    "additive_gaussian": AdditiveGaussianNoise,
-    "speckle": SpeckleNoise,
-    "poisson": PoissonNoise,
-}
-_NOISE_CONFIG_NAMES = {
-    config_type: name for name, config_type in _NOISE_CONFIG_TYPES.items()
+    name: config_type for config_type, name in NOISE_KIND_NAMES.items()
 }
 
 
@@ -247,7 +235,7 @@ def _load_scalar(arrays: Any, key: str, dtype: type) -> bool | int:
 
 
 def _encode_noise_config(config: NoiseConfig) -> str:
-    config_name = _NOISE_CONFIG_NAMES.get(type(config))
+    config_name = NOISE_KIND_NAMES.get(type(config))
     if config_name is None:
         raise TypeError(f"Unsupported noise configuration: {type(config).__name__}.")
     return json.dumps(

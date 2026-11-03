@@ -24,7 +24,7 @@ from letree.training.run import (
 SMALL_IMAGES = SquareImageConfig(
     height=16, width=16, min_squares=2, max_squares=4, min_side=2, max_side=8
 )
-NOISE = SaltAndPepperNoise(probability=0.05)
+NOISES = (SaltAndPepperNoise(probability=0.05),)
 SMALL_RUN = CorrectionRunConfig(
     CorrectionModelConfig(hidden_width=16, correction_recurrent=True),
     observed_steps=2,
@@ -35,7 +35,7 @@ SMALL_RUN = CorrectionRunConfig(
 def test_all_three_losses_fall_on_a_few_graphs() -> None:
     # A learning check for target indexing and gradient flow, not learnability
     family = build_sample_family(
-        1, 0, SMALL_IMAGES, ComponentTreeKind.MAX_TREE, NOISE, 2
+        1, 0, SMALL_IMAGES, ComponentTreeKind.MAX_TREE, NOISES, 2
     )
     samples = [family.clean, *(o.sample for o in family.noisy)]
     batch = Batch.from_data_list([adapt_generation_sample(s) for s in samples])
@@ -67,7 +67,7 @@ def dataset_root(tmp_path):
         {"train": 3, "val": 1, "test": 1},
         SMALL_IMAGES,
         ComponentTreeKind.MAX_TREE,
-        NOISE,
+        NOISES,
         2,
     )
     return root

@@ -54,7 +54,7 @@ def graphs():
             index,
             SMALL_IMAGES,
             ComponentTreeKind.MAX_TREE,
-            SaltAndPepperNoise(0.05),
+            (SaltAndPepperNoise(0.05),),
             2,
         )
         for index in range(2)

@@ -1,5 +1,6 @@
 from letree.generation.images import SquareImageConfig, generate_square_image
 from letree.generation.noise import (
+    NOISE_KIND_NAMES,
     AdditiveGaussianNoise,
     NoiseConfig,
     PoissonNoise,
@@ -22,6 +23,7 @@ from letree.generation.targets import (
 )
 
 __all__ = [
+    "NOISE_KIND_NAMES",
     "AdditiveGaussianNoise",
     "CorrectionAction",
     "CorrectionDiagnostics",

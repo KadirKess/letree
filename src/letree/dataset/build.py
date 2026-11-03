@@ -36,28 +36,41 @@ def build_sample_family(
     sample_index: int,
     image_config: SquareImageConfig,
     kind: ComponentTreeKind,
-    noise_config: NoiseConfig,
+    noise_configs: tuple[NoiseConfig, ...],
     realization_count: int,
 ) -> SampleFamily:
-    """Build one family from derived streams, independent of generation order."""
+    """Build one family from derived streams, independent of generation order.
+
+    Noisy observations follow the order of `noise_configs`, with the
+    realizations of each kind numbered from zero.
+    """
+    # Two configurations of one kind would read the same stream
+    kinds = [type(noise_config) for noise_config in noise_configs]
+    if len(set(kinds)) != len(kinds):
+        raise ValueError("Each noise kind may appear only once in a family.")
+
     image_rng = derive_rng(base_seed, sample_index, GenerationStage.SQUARE_IMAGE)
     clean_image = generate_square_image(image_config, image_rng)
     clean_sample = build_generation_sample(clean_image, kind)
 
-    noise_stage = NOISE_STAGES[type(noise_config)]
     noisy = []
-    for realization_index in range(realization_count):
-        noise_rng = derive_rng(
-            base_seed, sample_index, noise_stage, realization_index=realization_index
-        )
-        sample = build_generation_sample(clean_image, kind, noise_config, noise_rng)
-        noisy.append(
-            NoisyObservation(
-                sample=sample,
+    for noise_config in noise_configs:
+        noise_stage = NOISE_STAGES[type(noise_config)]
+        for realization_index in range(realization_count):
+            noise_rng = derive_rng(
+                base_seed,
+                sample_index,
+                noise_stage,
                 realization_index=realization_index,
-                noise_config=noise_config,
             )
-        )
+            sample = build_generation_sample(clean_image, kind, noise_config, noise_rng)
+            noisy.append(
+                NoisyObservation(
+                    sample=sample,
+                    realization_index=realization_index,
+                    noise_config=noise_config,
+                )
+            )
 
     return SampleFamily(sample_index, clean_sample, tuple(noisy))
 
@@ -68,7 +81,7 @@ def generate_dataset(
     split_family_counts: dict[str, int],
     image_config: SquareImageConfig,
     kind: ComponentTreeKind,
-    noise_config: NoiseConfig,
+    noise_configs: tuple[NoiseConfig, ...],
     realization_count: int,
     workers: int = 1,
 ) -> NpzDataset:
@@ -96,7 +109,7 @@ def generate_dataset(
         base_seed,
         image_config,
         kind,
-        noise_config,
+        noise_configs,
         realization_count,
     )
     progress = tqdm(total=len(jobs), desc="families", mininterval=5)
@@ -117,12 +130,12 @@ def _write_family(
     base_seed: int,
     image_config: SquareImageConfig,
     kind: ComponentTreeKind,
-    noise_config: NoiseConfig,
+    noise_configs: tuple[NoiseConfig, ...],
     realization_count: int,
     job: tuple[str, int],
 ) -> None:
     split, sample_index = job
     family = build_sample_family(
-        base_seed, sample_index, image_config, kind, noise_config, realization_count
+        base_seed, sample_index, image_config, kind, noise_configs, realization_count
     )
     dataset.save(split, family)

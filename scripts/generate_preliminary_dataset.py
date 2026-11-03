@@ -32,7 +32,7 @@ def main() -> None:
         {"train": arguments.train, "val": arguments.val, "test": arguments.test},
         SquareImageConfig(),
         ComponentTreeKind.MAX_TREE,
-        SaltAndPepperNoise(),
+        (SaltAndPepperNoise(),),
         arguments.realizations,
         arguments.workers,
     )

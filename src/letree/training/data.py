@@ -7,6 +7,7 @@ from torch.utils.data import Dataset
 from torch_geometric.loader import DataLoader
 
 from letree.dataset.store import NpzDataset
+from letree.generation.noise import NOISE_KIND_NAMES
 from letree.model.adapter import ModelData, adapt_generation_sample
 
 # Position zero is the clean observation of a family. Positions from one
@@ -44,11 +45,16 @@ class ObservationDataset(Dataset):
         family = self.dataset.load(self.split, sample_index)
         if position == CLEAN_POSITION:
             sample = family.clean
+            corruption = "clean"
         else:
-            sample = family.noisy[position - 1].sample
+            observation = family.noisy[position - 1]
+            sample = observation.sample
+            corruption = NOISE_KIND_NAMES[type(observation.noise_config)]
 
         graph = adapt_generation_sample(sample)
         graph.is_clean = torch.tensor(position == CLEAN_POSITION)
+        # Batching collects this string into a list, one name per graph
+        graph.corruption = corruption
         return graph
 
 

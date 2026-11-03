@@ -189,6 +189,26 @@ def test_family_writer_refuses_to_replace_an_existing_sample(tmp_path) -> None:
         save_sample_family(path, family)
 
 
+def test_family_accepts_one_realization_index_across_noise_kinds(tmp_path) -> None:
+    # Each noise kind numbers its realizations from zero on its own stream
+    family = _build_family(np.array([[10, 20, 30]], dtype=np.uint8))
+    shared = SampleFamily(
+        sample_index=family.sample_index,
+        clean=family.clean,
+        noisy=tuple(
+            NoisyObservation(0, o.noise_config, o.sample) for o in family.noisy
+        ),
+    )
+    path = tmp_path / "family.npz"
+    save_sample_family(path, shared)
+
+    loaded = load_sample_family(path)
+    assert [o.realization_index for o in loaded.noisy] == [0, 0, 0, 0]
+    assert [o.noise_config for o in loaded.noisy] == [
+        o.noise_config for o in family.noisy
+    ]
+
+
 def test_family_writer_requires_an_npz_path(tmp_path) -> None:
     family = _build_family(np.array([[10, 20]], dtype=np.uint8))
 
@@ -196,11 +216,13 @@ def test_family_writer_requires_an_npz_path(tmp_path) -> None:
         save_sample_family(tmp_path / "sample_000007.data", family)
 
 
-def test_family_rejects_duplicate_realization_indices(tmp_path) -> None:
+def test_family_rejects_duplicate_realization_indices_within_one_kind(
+    tmp_path,
+) -> None:
     family = _build_family(np.array([[10, 20]], dtype=np.uint8))
     duplicate = NoisyObservation(
         realization_index=family.noisy[0].realization_index,
-        noise_config=family.noisy[1].noise_config,
+        noise_config=family.noisy[0].noise_config,
         sample=family.noisy[1].sample,
     )
     invalid = SampleFamily(
@@ -352,7 +374,6 @@ def test_loading_and_adaptation_do_not_rederive_targets(tmp_path, monkeypatch) -
             "kinds must match",
         ),
         ("noisy.0.image", np.array([[1]], dtype=np.uint8), ValueError, "same shape"),
-        ("realization_indices", np.array([0, 0, 2, 3]), ValueError, "unique"),
         (
             "clean.targets.actions",
             np.array([1, 2, 2], dtype=object),
@@ -372,6 +393,20 @@ def test_reader_rejects_malformed_schema_two_fields(
     arrays[key] = value
     np.savez_compressed(path, **arrays)
     with pytest.raises(error, match=message):
+        load_sample_family(path)
+
+
+def test_reader_rejects_duplicate_realization_within_one_kind(tmp_path) -> None:
+    family = _build_family(np.array([[10, 20, 30]], dtype=np.uint8))
+    path = tmp_path / "family.npz"
+    save_sample_family(path, family)
+    with np.load(path, allow_pickle=False) as stored:
+        arrays = {name: stored[name] for name in stored.files}
+    arrays["noise_configs"] = arrays["noise_configs"].copy()
+    arrays["noise_configs"][1] = arrays["noise_configs"][0]
+    arrays["realization_indices"] = np.array([0, 0, 2, 3])
+    np.savez_compressed(path, **arrays)
+    with pytest.raises(ValueError, match="unique"):
         load_sample_family(path)
 
 

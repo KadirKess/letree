@@ -31,6 +31,14 @@ type NoiseConfig = (
     SaltAndPepperNoise | AdditiveGaussianNoise | SpeckleNoise | PoissonNoise
 )
 
+# Stable names of the corruption kinds, used in stored files and reports
+NOISE_KIND_NAMES = {
+    SaltAndPepperNoise: "salt_and_pepper",
+    AdditiveGaussianNoise: "additive_gaussian",
+    SpeckleNoise: "speckle",
+    PoissonNoise: "poisson",
+}
+
 
 def _validate_image(clean_image: NDArray[np.uint8]) -> None:
     if not isinstance(clean_image, np.ndarray):
