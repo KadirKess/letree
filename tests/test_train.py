@@ -5,31 +5,17 @@ import torch
 from torch_geometric.data import Batch
 
 from letree.component_tree import ComponentTreeKind
+from letree.data import to_graph
 from letree.dataset.build import build_sample_family, generate_dataset
 from letree.generation import SaltAndPepperNoise, SquareImageConfig
-from letree.model import (
-    CorrectionModelConfig,
-    CorrectionRunConfig,
-    adapt_generation_sample,
-    build_correction_model,
-)
-from letree.training.losses import correction_losses
-from letree.training.run import (
-    SELECTION_METRIC,
-    PreliminaryRunSettings,
-    epoch_report,
-    fit,
-)
+from letree.losses import correction_losses
+from letree.model import LetreeModel
+from letree.train import SELECTION_METRIC, RunSettings, epoch_report, fit
 
 SMALL_IMAGES = SquareImageConfig(
     height=16, width=16, min_squares=2, max_squares=4, min_side=2, max_side=8
 )
 NOISES = (SaltAndPepperNoise(probability=0.05),)
-SMALL_RUN = CorrectionRunConfig(
-    CorrectionModelConfig(hidden_width=16, correction_recurrent=True),
-    observed_steps=2,
-    correction_steps=1,
-)
 
 
 def test_all_three_losses_fall_on_a_few_graphs() -> None:
@@ -38,21 +24,21 @@ def test_all_three_losses_fall_on_a_few_graphs() -> None:
         1, 0, SMALL_IMAGES, ComponentTreeKind.MAX_TREE, NOISES, 2
     )
     samples = [family.clean, *(o.sample for o in family.noisy)]
-    batch = Batch.from_data_list([adapt_generation_sample(s) for s in samples])
+    batch = Batch.from_data_list([to_graph(s) for s in samples])
     torch.manual_seed(0)
-    model = build_correction_model(SMALL_RUN.model)
+    model = LetreeModel(16)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
 
     def losses():
         output = model(batch.x, batch.edge_index, batch.ptr, 2, 1)
         return correction_losses(output, batch)
 
-    initial = losses().as_floats()
+    initial = {name: loss.item() for name, loss in losses().items()}
     for _ in range(150):
         optimizer.zero_grad()
-        losses().total().backward()
+        sum(losses().values()).backward()
         optimizer.step()
-    final = losses().as_floats()
+    final = {name: loss.item() for name, loss in losses().items()}
 
     for name in initial:
         assert final[name] < 0.5 * initial[name], name
@@ -74,13 +60,12 @@ def dataset_root(tmp_path):
 
 
 def _settings(root, max_epochs):
-    return PreliminaryRunSettings(
+    return RunSettings(
         dataset_root=str(root),
-        include_noisy=True,
-        run=SMALL_RUN,
         max_epochs=max_epochs,
-        plateau_patience=3,
-        early_stopping_patience=10,
+        width=16,
+        observed_steps=2,
+        correction_steps=1,
         batch_size=4,
     )
 
@@ -94,7 +79,7 @@ def test_fit_writes_run_records_and_resumes(dataset_root, tmp_path) -> None:
     history = json.loads((run / "history.json").read_text())
     assert [entry["epoch"] for entry in history] == [0, 1, 2]
     settings = json.loads((run / "settings.json").read_text())
-    assert settings["settings"]["run"]["observed_steps"] == 2
+    assert settings["settings"]["observed_steps"] == 2
     assert settings["dataset_manifest"]["split_sample_counts"]["train"] == 3
     assert json.loads((run / "test.json").read_text()) == test
     assert test["all/images"] == 3

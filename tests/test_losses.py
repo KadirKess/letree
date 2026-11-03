@@ -1,4 +1,5 @@
 from math import exp, log, sqrt
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -6,14 +7,11 @@ from torch.nn import functional as F
 from torch_geometric.data import Batch
 
 from letree.component_tree import ComponentTreeKind
+from letree.data import to_graph
 from letree.dataset.build import build_sample_family
 from letree.generation import SaltAndPepperNoise, SquareImageConfig
-from letree.model import (
-    CorrectionModelConfig,
-    adapt_generation_sample,
-    build_correction_model,
-)
-from letree.training.losses import correction_losses, image_mean, parent_cross_entropy
+from letree.losses import correction_losses, image_mean, parent_cross_entropy
+from letree.model import LetreeModel, Step
 
 SMALL_IMAGES = SquareImageConfig(
     height=16, width=16, min_squares=2, max_squares=4, min_side=2, max_side=8
@@ -26,14 +24,10 @@ def test_parent_cross_entropy_matches_hand_calculation() -> None:
     key = torch.tensor([[2.0], [0.0], [1.0]])
     log_normalizer = torch.tensor([log(exp(2) + exp(0) + exp(1)), 0.0, 0.0])
 
-    losses = parent_cross_entropy(
-        query,
-        key,
-        log_normalizer,
-        local_targets=torch.tensor([2, 0, 0]),
-        graph_ptr=torch.tensor([0, 3]),
-        batch=torch.zeros(3, dtype=torch.long),
-    )
+    step = Step(None, query, key, log_normalizer, None)
+    data = SimpleNamespace(ptr=torch.tensor([0, 3]), batch=torch.zeros(3, dtype=int))
+
+    losses = parent_cross_entropy(step, torch.tensor([2, 0, 0]), data)
 
     assert losses[0].item() == pytest.approx(2.4076 - 1.0, abs=1e-4)
 
@@ -42,7 +36,9 @@ def test_image_mean_weights_images_equally() -> None:
     values = torch.tensor([0.2, 0.4, 1.0, 0.0, 0.5])
     batch = torch.tensor([0, 0, 1, 1, 1])
 
-    assert image_mean(values, batch, 2).item() == pytest.approx(0.4)
+    data = SimpleNamespace(batch=batch, num_graphs=2)
+
+    assert image_mean(values, data).item() == pytest.approx(0.4)
     assert values.mean().item() == pytest.approx(0.42)
 
 
@@ -60,7 +56,10 @@ def graphs():
         for index in range(2)
     ]
     samples = [s for f in families for s in (f.clean, *(o.sample for o in f.noisy))]
-    return [adapt_generation_sample(sample, dtype=torch.float64) for sample in samples]
+    graphs = [to_graph(sample) for sample in samples]
+    for graph in graphs:
+        graph.x = graph.x.double()
+    return graphs
 
 
 def _forward(model, graphs, order):
@@ -75,9 +74,9 @@ def _scores(query, key, start, stop):
 
 def test_losses_match_dense_cross_entropy_per_image(graphs) -> None:
     torch.manual_seed(0)
-    model = build_correction_model(CorrectionModelConfig(8, True)).double()
+    model = LetreeModel(8).double()
     output, batch = _forward(model, graphs, range(len(graphs)))
-    observed, corrective = output.observed_steps[-1], output.correction_steps[-1]
+    observed, corrective = output.observed[-1], output.corrective[-1]
     assert int(batch.corrective_parents[batch.ptr[1] :].max()) > 0
 
     expected = {"observed_parent": [], "corrective_parent": [], "action": []}
@@ -85,21 +84,19 @@ def test_losses_match_dense_cross_entropy_per_image(graphs) -> None:
     for start, stop in zip(bounds[:-1], bounds[1:]):
         expected["observed_parent"].append(
             F.cross_entropy(
-                _scores(observed.parent_query, observed.parent_key, start, stop),
+                _scores(observed.query, observed.key, start, stop),
                 batch.observed_parents[start:stop],
             )
         )
         expected["corrective_parent"].append(
             F.cross_entropy(
-                _scores(
-                    corrective.corrective_query, corrective.corrective_key, start, stop
-                ),
+                _scores(corrective.query, corrective.key, start, stop),
                 batch.corrective_parents[start:stop],
             )
         )
         expected["action"].append(
             F.cross_entropy(
-                corrective.action_logits[start:stop],
+                output.actions[-1][start:stop],
                 batch.correction_actions[start:stop],
             )
         )
@@ -107,7 +104,7 @@ def test_losses_match_dense_cross_entropy_per_image(graphs) -> None:
     losses = correction_losses(output, batch)
     for name, values in expected.items():
         reference = torch.stack(values).mean()
-        actual = getattr(losses, name)
+        actual = losses[name]
         assert actual.item() == pytest.approx(reference.item(), rel=1e-12)
         actual_gradients = torch.autograd.grad(
             actual, model.parameters(), retain_graph=True, allow_unused=True
@@ -122,9 +119,13 @@ def test_losses_match_dense_cross_entropy_per_image(graphs) -> None:
 
 def test_losses_do_not_depend_on_graph_order(graphs) -> None:
     torch.manual_seed(0)
-    model = build_correction_model(CorrectionModelConfig(8, True)).double()
+    model = LetreeModel(8).double()
 
-    forward = correction_losses(*_forward(model, graphs, [0, 1, 2, 3, 4, 5])).total()
-    shuffled = correction_losses(*_forward(model, graphs, [5, 3, 1, 0, 2, 4])).total()
+    forward = sum(
+        correction_losses(*_forward(model, graphs, [0, 1, 2, 3, 4, 5])).values()
+    )
+    shuffled = sum(
+        correction_losses(*_forward(model, graphs, [5, 3, 1, 0, 2, 4])).values()
+    )
 
     assert forward.item() == pytest.approx(shuffled.item(), rel=1e-12)

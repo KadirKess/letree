@@ -10,15 +10,18 @@ from letree.component_tree import (
     build_reference_component_tree,
     build_reference_rag,
 )
+from letree.data import ObservationDataset, make_loader, to_graph
+from letree.dataset.build import generate_dataset
 from letree.generation import (
+    AdditiveGaussianNoise,
     GenerationSample,
+    PoissonNoise,
+    SaltAndPepperNoise,
+    SpeckleNoise,
+    SquareImageConfig,
     TreeImage,
     build_generation_sample,
     derive_correction_targets,
-)
-from letree.model import (
-    ModelData,
-    adapt_generation_sample,
 )
 
 
@@ -80,7 +83,7 @@ def test_exact_features_use_observed_non_square_image_area() -> None:
         [0, 0, 1],
     )
 
-    adapted = adapt_generation_sample(_sample(tree_image))
+    adapted = to_graph(_sample(tree_image))
 
     assert adapted.x.dtype == torch.float32
     torch.testing.assert_close(
@@ -94,9 +97,7 @@ def test_exact_features_use_observed_non_square_image_area() -> None:
 
 @pytest.mark.parametrize("kind", list(ComponentTreeKind))
 def test_one_pixel_features_and_targets_are_finite_for_both_tree_kinds(kind) -> None:
-    adapted = adapt_generation_sample(
-        _reference_sample(np.array([[7]], dtype=np.uint8), kind)
-    )
+    adapted = to_graph(_reference_sample(np.array([[7]], dtype=np.uint8), kind))
 
     torch.testing.assert_close(
         adapted.x,
@@ -117,7 +118,7 @@ def test_corrupted_sample_selects_only_observed_graph_and_parent_targets() -> No
     )
     corrupted = _tree_image([[30, 30]], [[0, 0]], [], [30], [2], [0], [0])
 
-    adapted = adapt_generation_sample(_sample(clean, corrupted))
+    adapted = to_graph(_sample(clean, corrupted))
 
     assert adapted.x.shape == (1, 3)
     torch.testing.assert_close(adapted.x[:, 0], torch.tensor([30 / 255]))
@@ -131,7 +132,7 @@ def test_corrupted_sample_selects_only_observed_graph_and_parent_targets() -> No
 
 def test_anchor_feature_exposes_an_asymmetry_missing_from_level_and_area() -> None:
     sample = _reference_sample(np.array([[2, 3, 2]], dtype=np.uint8))
-    adapted = adapt_generation_sample(sample)
+    adapted = to_graph(sample)
     swap = torch.tensor([2, 1, 0])
 
     torch.testing.assert_close(
@@ -163,7 +164,7 @@ def test_edges_are_bidirectional_self_looped_deduplicated_and_sorted() -> None:
         [0, 0, 1],
     )
 
-    adapted = adapt_generation_sample(_sample(tree_image))
+    adapted = to_graph(_sample(tree_image))
 
     torch.testing.assert_close(
         adapted.edge_index,
@@ -175,12 +176,8 @@ def test_edges_are_bidirectional_self_looped_deduplicated_and_sorted() -> None:
 
 
 def test_pyg_loader_offsets_edges_but_not_parent_targets() -> None:
-    three_nodes = adapt_generation_sample(
-        _reference_sample(np.array([[2, 3, 2]], dtype=np.uint8))
-    )
-    one_node = adapt_generation_sample(
-        _reference_sample(np.array([[7]], dtype=np.uint8))
-    )
+    three_nodes = to_graph(_reference_sample(np.array([[2, 3, 2]], dtype=np.uint8)))
+    one_node = to_graph(_reference_sample(np.array([[7]], dtype=np.uint8)))
 
     packed = next(
         iter(DataLoader([three_nodes, one_node], batch_size=2, shuffle=False))
@@ -207,10 +204,10 @@ def test_pyg_loader_offsets_edges_but_not_parent_targets() -> None:
 
 
 def test_pyg_loader_preserves_nonzero_local_parents_in_later_graphs() -> None:
-    first = adapt_generation_sample(
+    first = to_graph(
         _reference_sample(np.array([[7]], dtype=np.uint8), ComponentTreeKind.MIN_TREE)
     )
-    second = adapt_generation_sample(
+    second = to_graph(
         _reference_sample(
             np.array([[10, 20]], dtype=np.uint8), ComponentTreeKind.MIN_TREE
         )
@@ -222,41 +219,6 @@ def test_pyg_loader_preserves_nonzero_local_parents_in_later_graphs() -> None:
     torch.testing.assert_close(packed.observed_parents, torch.tensor([0, 1, 1]))
     torch.testing.assert_close(packed.corrective_parents, torch.tensor([0, 1, 1]))
     assert torch.any(packed.edge_index == 2)
-
-
-def test_adapter_respects_requested_floating_dtype_and_device() -> None:
-    sample = _reference_sample(np.array([[10, 20]], dtype=np.uint8))
-
-    adapted = adapt_generation_sample(sample, dtype=torch.float64, device="cpu")
-
-    assert adapted.x.dtype == torch.float64
-    assert adapted.x.device == torch.device("cpu")
-    assert adapted.edge_index.dtype == torch.int64
-    assert adapted.observed_parents.dtype == torch.int64
-
-
-@pytest.mark.parametrize("dtype", [torch.int64, torch.bool])
-def test_adapter_rejects_non_floating_feature_dtype(dtype) -> None:
-    sample = _reference_sample(np.array([[10]], dtype=np.uint8))
-
-    with pytest.raises(TypeError, match="floating-point dtype"):
-        adapt_generation_sample(sample, dtype=dtype)
-
-
-def test_model_data_exposes_only_model_inputs_and_targets() -> None:
-    adapted = adapt_generation_sample(
-        _reference_sample(np.array([[10, 20]], dtype=np.uint8))
-    )
-
-    assert isinstance(adapted, ModelData)
-    assert set(adapted.keys()) == {
-        "x",
-        "edge_index",
-        "observed_parents",
-        "corrective_parents",
-        "correction_actions",
-        "num_nodes",
-    }
 
 
 @pytest.mark.parametrize(
@@ -275,7 +237,7 @@ def test_refining_and_mixed_observations_have_three_exact_targets(
     clean_image = [[10, 10, 20]] if refining else [[10, 20, 30]]
     clean = _reference_sample(np.asarray(clean_image, dtype=np.uint8), kind).clean
     observed = _reference_sample(np.asarray(observed_image, dtype=np.uint8), kind).clean
-    adapted = adapt_generation_sample(_sample(clean, observed))
+    adapted = to_graph(_sample(clean, observed))
     torch.testing.assert_close(adapted.observed_parents, torch.tensor(observed_parents))
     torch.testing.assert_close(
         adapted.corrective_parents, torch.tensor(corrective_parents)
@@ -289,7 +251,7 @@ def test_refining_and_mixed_observations_have_three_exact_targets(
 def test_adapter_preserves_targets_under_independent_node_relabeling(kind):
     clean = _reference_sample(np.array([[10, 10, 20]], dtype=np.uint8), kind).clean
     observed = _reference_sample(np.array([[11, 12, 20]], dtype=np.uint8), kind).clean
-    original = adapt_generation_sample(_sample(clean, observed))
+    original = to_graph(_sample(clean, observed))
 
     def permute(tree_image, permutation):
         old_order = np.argsort(permutation)
@@ -311,7 +273,7 @@ def test_adapter_preserves_targets_under_independent_node_relabeling(kind):
 
     clean_permutation = np.array([1, 0])
     observed_permutation = np.array([2, 0, 1])
-    reordered = adapt_generation_sample(
+    reordered = to_graph(
         _sample(
             permute(clean, clean_permutation), permute(observed, observed_permutation)
         )
@@ -329,3 +291,91 @@ def test_adapter_preserves_targets_under_independent_node_relabeling(kind):
     assert sorted(map(tuple, reordered.edge_index.T.tolist())) == sorted(
         map(tuple, remapped_edges.T.tolist())
     )
+
+
+SMALL_IMAGES = SquareImageConfig(
+    height=16, width=16, min_squares=2, max_squares=4, min_side=2, max_side=8
+)
+
+
+@pytest.fixture(scope="module")
+def dataset_root(tmp_path_factory):
+    root = tmp_path_factory.mktemp("observations") / "data"
+    generate_dataset(
+        root,
+        7,
+        {"train": 2, "val": 0},
+        SMALL_IMAGES,
+        ComponentTreeKind.MAX_TREE,
+        (SaltAndPepperNoise(probability=0.05),),
+        2,
+    )
+    return root
+
+
+@pytest.fixture(scope="module")
+def mixed_root(tmp_path_factory):
+    root = tmp_path_factory.mktemp("mixed") / "data"
+    generate_dataset(
+        root,
+        7,
+        {"train": 2},
+        SMALL_IMAGES,
+        ComponentTreeKind.MAX_TREE,
+        (
+            SaltAndPepperNoise(probability=0.05),
+            AdditiveGaussianNoise(standard_deviation=10.0),
+            SpeckleNoise(),
+            PoissonNoise(),
+        ),
+        1,
+    )
+    return root
+
+
+def test_main_run_serves_clean_then_noisy_observations(dataset_root) -> None:
+    dataset = ObservationDataset(dataset_root, "train", include_noisy=True)
+
+    assert dataset.items == [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]
+    batch = next(iter(make_loader(dataset, 6, shuffle=False, seed=0)))
+    assert batch.is_clean.tolist() == [True, False, False, True, False, False]
+    assert batch.num_graphs == 6
+
+
+def test_clean_only_control_serves_no_noisy_observation(dataset_root) -> None:
+    dataset = ObservationDataset(dataset_root, "train", include_noisy=False)
+
+    assert dataset.items == [(0, 0), (1, 0)]
+    assert all(bool(dataset[i].is_clean) for i in range(len(dataset)))
+
+
+def test_empty_split_is_rejected(dataset_root) -> None:
+    with pytest.raises(ValueError, match="no families"):
+        ObservationDataset(dataset_root, "val", include_noisy=True)
+
+
+def test_seeded_shuffle_is_reproducible(dataset_root) -> None:
+    dataset = ObservationDataset(dataset_root, "train", include_noisy=True)
+
+    def order():
+        loader = make_loader(dataset, 1, shuffle=True, seed=4)
+        return [int(batch.num_nodes) for batch in loader]
+
+    assert order() == order()
+
+
+def test_mixed_dataset_serves_every_noise_kind_of_each_family(mixed_root) -> None:
+    dataset = ObservationDataset(mixed_root, "train", include_noisy=True)
+
+    assert dataset.items == [(i, p) for i in range(2) for p in range(5)]
+    batch = next(iter(make_loader(dataset, 10, shuffle=False, seed=0)))
+    kinds = ["clean", "salt_and_pepper", "additive_gaussian", "speckle", "poisson"]
+    assert batch.corruption == kinds * 2
+    assert batch.is_clean.tolist() == [True, False, False, False, False] * 2
+
+
+def test_clean_only_control_on_a_mixed_dataset(mixed_root) -> None:
+    dataset = ObservationDataset(mixed_root, "train", include_noisy=False)
+
+    assert dataset.items == [(0, 0), (1, 0)]
+    assert [dataset[i].corruption for i in range(2)] == ["clean", "clean"]

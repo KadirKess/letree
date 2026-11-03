@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from letree.generation import CorrectionAction
-from letree.training.metrics import (
+from letree.metrics import (
     batch_image_metrics,
     graph_local_argmax,
     summarize_image_metrics,
@@ -68,14 +68,12 @@ def test_clean_only_summary_has_no_noisy_group() -> None:
 def test_joint_accuracy_needs_parent_and_action_right_on_the_same_node() -> None:
     # Node 0 has both right, node 1 only its parent, node 2 only its action
     hidden = torch.eye(3)
-    step = SimpleNamespace(
-        parent_query=hidden,
-        parent_key=hidden,
-        corrective_query=hidden,
-        corrective_key=hidden,
-        action_logits=torch.tensor([[1.0, 0, 0], [1.0, 0, 0], [0, 1.0, 0]]),
+    step = SimpleNamespace(query=hidden, key=hidden)
+    output = SimpleNamespace(
+        observed=[step],
+        corrective=[step],
+        actions=[torch.tensor([[1.0, 0, 0], [1.0, 0, 0], [0, 1.0, 0]])],
     )
-    output = SimpleNamespace(observed_steps=(step,), correction_steps=(step,))
     data = SimpleNamespace(
         num_graphs=1,
         ptr=torch.tensor([0, 3]),
@@ -99,14 +97,12 @@ def test_baselines_on_a_clean_observation() -> None:
     actions = torch.full((3,), int(CorrectionAction.KEEP_ONE))
     actions[0] = int(CorrectionAction.KEEP_ZERO)
     hidden = torch.eye(3)
-    step = SimpleNamespace(
-        parent_query=hidden,
-        parent_key=hidden,
-        corrective_query=hidden,
-        corrective_key=hidden,
-        action_logits=torch.zeros(3, 3),
+    step = SimpleNamespace(query=hidden, key=hidden)
+    output = SimpleNamespace(
+        observed=[step],
+        corrective=[step],
+        actions=[torch.zeros(3, 3)],
     )
-    output = SimpleNamespace(observed_steps=(step,), correction_steps=(step,))
     data = SimpleNamespace(
         num_graphs=1,
         ptr=torch.tensor([0, 3]),

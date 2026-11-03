@@ -63,7 +63,7 @@ To generate a salt-and-pepper dataset and train on it:
 
 ```bash
 uv run python scripts/generate_preliminary_dataset.py dataset
-uv run python scripts/train_preliminary.py dataset run/main --max-epochs 100
+uv run python scripts/train.py dataset run/main --max-epochs 100
 ```
 
 Training uses a CUDA GPU when one is available, then Apple's MPS backend, then

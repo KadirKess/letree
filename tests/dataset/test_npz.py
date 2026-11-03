@@ -259,7 +259,7 @@ def test_family_reader_rejects_an_unknown_schema_version(tmp_path) -> None:
 def test_loading_and_adaptation_do_not_rederive_targets(tmp_path, monkeypatch) -> None:
     import letree.generation.samples as sample_module
     import letree.generation.targets as target_module
-    from letree.model import adapt_generation_sample
+    from letree.data import to_graph
 
     family = _build_family(np.array([[10, 10, 30], [10, 20, 30]], dtype=np.uint8))
     path = tmp_path / "family.npz"
@@ -272,7 +272,7 @@ def test_loading_and_adaptation_do_not_rederive_targets(tmp_path, monkeypatch) -
     monkeypatch.setattr(target_module, "derive_correction_targets", forbidden)
     loaded = load_sample_family(path)
     for observation in loaded.noisy:
-        adapted = adapt_generation_sample(observation.sample)
+        adapted = to_graph(observation.sample)
         np.testing.assert_array_equal(
             adapted.corrective_parents.numpy(),
             observation.sample.correction_targets.corrective_parents,

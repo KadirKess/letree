@@ -2,14 +2,12 @@
 
 import torch
 from torch import Tensor
+from torch_geometric.data import Batch
 from torch_geometric.utils import scatter
 
 from letree.generation.targets import CorrectionAction
-from letree.model.adapter import ModelData
-from letree.model.correction import CorrectionModelOutput
+from letree.model import Output
 
-# Accuracies compare argmax predictions with targets. Baselines compare targets
-# with a trivial rule and need no model.
 IMAGE_QUANTITIES = (
     "observed_parent_accuracy",
     "corrective_parent_accuracy",
@@ -22,17 +20,14 @@ IMAGE_QUANTITIES = (
 
 @torch.no_grad()
 def graph_local_argmax(
-    query: Tensor,
-    key: Tensor,
-    graph_ptr: Tensor,
+    query: Tensor, key: Tensor, graph_ptr: Tensor
 ) -> tuple[Tensor, Tensor]:
     """Local argmax parents and a mask of nodes whose maximum is tied.
 
     The argmax takes the first maximal candidate. The score scale is skipped
     because it does not change the argmax.
     """
-    predictions = []
-    tied = []
+    predictions, tied = [], []
     bounds = graph_ptr.tolist()
     for start, stop in zip(bounds[:-1], bounds[1:]):
         scores = query[start:stop] @ key[start:stop].T
@@ -42,35 +37,25 @@ def graph_local_argmax(
     return torch.cat(predictions), torch.cat(tied)
 
 
-def image_accuracy(correct: Tensor, batch: Tensor, graph_count: int) -> Tensor:
-    return scatter(correct.float(), batch, dim=0, reduce="mean", dim_size=graph_count)
-
-
-def batch_image_metrics(
-    output: CorrectionModelOutput, data: ModelData
-) -> dict[str, Tensor]:
+def batch_image_metrics(output: Output, data: Batch) -> dict[str, Tensor]:
     """One value per image for each quantity, plus node counts and tie counts."""
-    observed = output.observed_steps[-1]
-    corrective = output.correction_steps[-1]
-    graph_count = data.num_graphs
-
+    observed, corrective = output.observed[-1], output.corrective[-1]
     observed_predictions, observed_tied = graph_local_argmax(
-        observed.parent_query, observed.parent_key, data.ptr
+        observed.query, observed.key, data.ptr
     )
     corrective_predictions, corrective_tied = graph_local_argmax(
-        corrective.corrective_query, corrective.corrective_key, data.ptr
+        corrective.query, corrective.key, data.ptr
     )
-    action_predictions = corrective.action_logits.argmax(dim=1)
     corrective_correct = corrective_predictions == data.corrective_parents
-    action_correct = action_predictions == data.correction_actions
+    action_correct = output.actions[-1].argmax(dim=1) == data.correction_actions
 
     def per_image(correct: Tensor) -> Tensor:
-        return image_accuracy(correct, data.batch, graph_count)
-
-    def per_image_count(mask: Tensor) -> Tensor:
         return scatter(
-            mask.long(), data.batch, dim=0, reduce="sum", dim_size=graph_count
+            correct.float(), data.batch, reduce="mean", dim_size=data.num_graphs
         )
+
+    def count(mask: Tensor) -> Tensor:
+        return scatter(mask.long(), data.batch, reduce="sum", dim_size=data.num_graphs)
 
     return {
         "observed_parent_accuracy": per_image(
@@ -86,9 +71,9 @@ def batch_image_metrics(
         "always_merge_baseline": per_image(
             data.correction_actions == CorrectionAction.MERGE
         ),
-        "observed_ties": per_image_count(observed_tied),
-        "corrective_ties": per_image_count(corrective_tied),
-        "node_count": data.ptr[1:] - data.ptr[:-1],
+        "observed_ties": count(observed_tied),
+        "corrective_ties": count(corrective_tied),
+        "node_count": data.ptr.diff(),
         "is_clean": data.is_clean,
     }
 
