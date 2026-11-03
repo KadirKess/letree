@@ -9,6 +9,7 @@ from torch.nn.attention.flex_attention import create_block_mask
 from letree.attention import (
     flex_graph_attention,
     readable_graph_attention,
+    round_to_tf32,
     same_graph_block_mask,
 )
 from letree.experiments.losses import correction_losses
@@ -207,3 +208,64 @@ def test_flex_model_parameter_gradients_match_dense_on_cuda():
         flex.named_parameters(), dense.named_parameters(), strict=True
     ):
         torch.testing.assert_close(a.grad, e.grad, rtol=1e-4, atol=1e-5, msg=name)
+
+
+def _truncate_to_tf32(values):
+    # What the GPU does to a float32 matmul input under TF32
+    return (values.view(torch.int32) & ~0x1FFF).view(torch.float32)
+
+
+def _large_values(count=1_000, width=128, scale=100.0):
+    generator = torch.Generator().manual_seed(4)
+    return torch.randn(count, width, generator=generator) * scale
+
+
+def test_tf32_rounding_is_within_half_a_tf32_step():
+    values = _large_values()
+    rounded = round_to_tf32(values)
+
+    assert (rounded.view(torch.int32) & 0x1FFF).eq(0).all()
+    # TF32 keeps 10 explicit mantissa bits, so a step is 2 ** -10 of the leading power
+    exponent = torch.frexp(values.double()).exponent
+    half_step = torch.ldexp(torch.ones_like(values.double()), exponent - 12)
+    assert ((rounded.double() - values.double()).abs() <= half_step).all()
+
+
+def test_tf32_rounding_survives_the_gpu_truncation():
+    rounded = round_to_tf32(_large_values())
+    assert torch.equal(_truncate_to_tf32(rounded), rounded)
+
+
+def test_products_of_tf32_values_are_exact_in_float32():
+    first, second = round_to_tf32(_large_values()).chunk(2)
+    assert torch.equal((first * second).double(), first.double() * second.double())
+
+
+def test_tf32_rounding_passes_the_gradient_through():
+    values = _large_values(count=10).requires_grad_()
+    weights = torch.randn(10, 128)
+    (round_to_tf32(values) * weights).sum().backward()
+    assert torch.equal(values.grad, weights)
+
+
+@cuda
+def test_tf32_flex_log_z_matches_float64_on_large_scores():
+    torch.set_float32_matmul_precision("high")
+    try:
+        graph_ptr = torch.tensor([0, 300, 301, 1_000], device="cuda")
+        query, key, hidden = (
+            round_to_tf32(_large_values(1_000).cuda()) for _ in range(3)
+        )
+        _, log_z = flex_graph_attention(
+            query, key, hidden, same_graph_block_mask(graph_ptr)
+        )
+        _, expected = readable_graph_attention(
+            query.double(), key.double(), hidden.double(), graph_ptr
+        )
+    finally:
+        torch.set_float32_matmul_precision("highest")
+
+    # Scores reach about 40,000. Truncated inputs would lower log Z by about
+    # 0.1 percent of that, while rounded ones only differ in summation order.
+    assert (expected.abs().max() > 10_000).item()
+    torch.testing.assert_close(log_z.double(), expected, rtol=0, atol=0.5)

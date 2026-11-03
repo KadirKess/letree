@@ -9,6 +9,7 @@ from torch_geometric.utils import scatter
 from letree.attention import (
     flex_graph_attention,
     readable_graph_attention,
+    round_to_tf32,
     same_graph_block_mask,
 )
 
@@ -38,12 +39,14 @@ class LetreeModel(nn.Module):
         correction_recurrent: bool = True,
         aggregations: tuple[str, ...] = ("max", "min"),
         attention: str = "dense",
+        tf32_attention: bool = False,
     ) -> None:
         super().__init__()
         if attention not in ("dense", "flex"):
             raise ValueError(f"Unknown attention backend: {attention!r}.")
         self.aggregations = aggregations
         self.attention = attention
+        self.tf32_attention = tf32_attention
 
         gru_input = (2 + len(aggregations)) * width
         self.encoder = nn.Linear(FEATURE_COUNT, width)
@@ -76,6 +79,10 @@ class LetreeModel(nn.Module):
 
         def attend(hidden, query_layer, key_layer):
             query, key = query_layer(hidden), key_layer(hidden)
+            # Under TF32 the kernel, the loss and the metrics must read the same
+            # scores, or the loss rewards growing them
+            if self.tf32_attention:
+                query, key = round_to_tf32(query), round_to_tf32(key)
             if block_mask is not None:
                 message, log_z = flex_graph_attention(query, key, hidden, block_mask)
             else:

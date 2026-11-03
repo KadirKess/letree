@@ -118,6 +118,8 @@ def test_validation_reports_every_noise_kind_on_the_same_images(make_dataset):
     assert summary[f"noisy/{joint}"] == pytest.approx(
         sum(summary[f"{kind}/{joint}"] for kind in kinds) / 4
     )
+    assert summary["max_length/query"] > 0
+    assert summary["max_length/key"] > 0
 
 
 @pytest.mark.parametrize("compile", ["model", "step"])
@@ -145,6 +147,8 @@ def _history_entry(epoch, score, groups=("clean", "noisy")):
         "loss/observed_parent": 0.5,
         "loss/corrective_parent": 0.25,
         "loss/action": 0.125,
+        "max_length/query": 12.5,
+        "max_length/key": 3.5,
         SELECTION_METRIC: score,
     }
     accuracies = {
@@ -182,6 +186,7 @@ def test_epoch_report_separates_losses_and_groups() -> None:
     assert _row(report, "val ") == [0.5, 0.25, 0.125, 0.875]
     assert _row(report, "val clean") == [0.95, 0.85, 0.75, 0.65]
     assert _row(report, "val noisy") == [0.9, 0.8, 0.7, 0.6]
+    assert "  max length, val         query 12.5  key 3.5" in report.splitlines()
     # Epoch 1 improved, epoch 2 did not
     assert report.splitlines()[-1] == (
         "  selection (val joint, image mean) 0.5000  best 0.6000 at epoch 1  stale 1/10"

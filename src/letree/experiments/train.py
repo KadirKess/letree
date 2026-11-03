@@ -58,6 +58,7 @@ def build_model(settings: RunSettings) -> LetreeModel:
         settings.correction_recurrent,
         settings.aggregations,
         settings.attention,
+        tf32_attention=settings.precision == "tf32",
     )
 
     # Node counts change every batch, so shapes are dynamic from the start
@@ -120,6 +121,7 @@ def evaluate(model, loader, settings, device) -> dict[str, float]:
     model.eval()
     per_image = defaultdict(list)
     loss_totals = defaultdict(float)
+    largest = defaultdict(float)
     graph_count = 0
     for data in tqdm(
         loader, desc="evaluate", leave=False, mininterval=PROGRESS_SECONDS
@@ -136,6 +138,12 @@ def evaluate(model, loader, settings, device) -> dict[str, float]:
             loss_totals[name] += value.item() * data.num_graphs
         graph_count += data.num_graphs
 
+        # Lengths that keep growing mean the scores are running away
+        for step in output.observed + output.corrective:
+            for name, values in (("query", step.query), ("key", step.key)):
+                length = values.norm(dim=1).max().item()
+                largest[name] = max(largest[name], length)
+
         for name, value in batch_image_metrics(output, data).items():
             per_image[name].append(value.cpu())
         # PyG collates the string corruption names into a list per batch
@@ -144,6 +152,8 @@ def evaluate(model, loader, settings, device) -> dict[str, float]:
     summary = summarize_image_metrics(per_image)
     for name, total in loss_totals.items():
         summary[f"loss/{name}"] = total / graph_count
+    for name, length in largest.items():
+        summary[f"max_length/{name}"] = length
     return summary
 
 
@@ -190,6 +200,10 @@ def epoch_report(history: list[dict], stale: int, patience: int) -> str:
                     [validation[f"{group}/{n}/image_mean"] for n in ACCURACY_NAMES],
                 )
             )
+    lines.append(
+        f"  {'max length, val':<24}query {validation['max_length/query']:.1f}  "
+        f"key {validation['max_length/key']:.1f}"
+    )
     best_text = (
         "none yet"
         if best is None

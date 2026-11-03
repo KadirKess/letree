@@ -37,6 +37,19 @@ SMALL_KERNEL_OPTIONS = {"BLOCK_M": 64, "BLOCK_N": 64, "num_stages": 1}
 compiled_flex_attention = torch.compile(flex_attention, dynamic=True)
 
 
+def round_to_tf32(values: Tensor) -> Tensor:
+    """Float32 values rounded to the 10 mantissa bits a TF32 matmul reads.
+
+    The GPU truncates float32 inputs to TF32, which biases every score towards
+    zero, while the loss computes its target score in full float32. Rounding
+    first makes both read the same values, whose products are exact in float32.
+    The gradient passes through unchanged.
+    """
+    bits = values.view(torch.int32)
+    rounded = ((bits + 0x1000) & ~0x1FFF).view(torch.float32)
+    return values + (rounded - values).detach()
+
+
 def same_graph_block_mask(graph_ptr: Tensor) -> BlockMask:
     node_count = int(graph_ptr[-1])
     graph_ids = torch.repeat_interleave(

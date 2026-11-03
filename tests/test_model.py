@@ -371,3 +371,15 @@ def test_invalid_settings_are_rejected():
         LetreeModel(4, attention="sparse")
     with pytest.raises(ValueError, match="correction_recurrent"):
         LetreeModel(4, correction_recurrent=False).double()(features, edges, ptr, 1, 1)
+
+
+def test_tf32_attention_rounds_every_query_and_key():
+    torch.manual_seed(0)
+    model = LetreeModel(16, tf32_attention=True)
+    features, edges, graph_ptr = _inputs()
+
+    output = model(features.float(), edges, graph_ptr, 2, 1)
+
+    for step in output.observed + output.corrective:
+        for values in (step.query, step.key):
+            assert (values.view(torch.int32) & 0x1FFF).eq(0).all()
