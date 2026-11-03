@@ -7,12 +7,12 @@ from numpy.typing import NDArray
 
 @dataclass(frozen=True)
 class SquareImageConfig:
-    height: int = 256
-    width: int = 256
+    height: int = 64
+    width: int = 64
     min_squares: int = 64
     max_squares: int = 192
-    min_side: int = 4
-    max_side: int = 64
+    min_side: int = 2
+    max_side: int = 16
     min_background_level: int = 0
     max_background_level: int = 255
     min_square_level: int = 0
