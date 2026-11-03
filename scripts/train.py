@@ -16,6 +16,18 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--clean-only", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--attention", choices=("dense", "flex"), default="dense")
+    parser.add_argument("--precision", choices=("fp32", "tf32"), default="fp32")
+    parser.add_argument("--compile", choices=("none", "model", "step"), default="none")
+    parser.add_argument(
+        "--compile-mode",
+        choices=(
+            "default",
+            "reduce-overhead",
+            "max-autotune",
+            "max-autotune-no-cudagraphs",
+        ),
+        default="default",
+    )
     parser.add_argument("--aggregations", nargs="*", default=["max", "min"])
     parser.add_argument("--width", type=int, default=128)
     parser.add_argument("--observed-steps", type=int, default=10)
@@ -37,6 +49,9 @@ def main() -> None:
         width=arguments.width,
         aggregations=tuple(arguments.aggregations),
         attention=arguments.attention,
+        precision=arguments.precision,
+        compile=arguments.compile,
+        compile_mode=arguments.compile_mode,
         observed_steps=arguments.observed_steps,
         correction_steps=arguments.correction_steps,
         plateau_patience=arguments.plateau_patience,

@@ -36,6 +36,9 @@ class RunSettings:
     correction_recurrent: bool = True
     aggregations: tuple[str, ...] = ("max", "min")
     attention: str = "dense"
+    precision: str = "fp32"
+    compile: str = "none"
+    compile_mode: str = "default"
     observed_steps: int = 10
     correction_steps: int = 5
     plateau_patience: int = 3
@@ -50,12 +53,24 @@ class RunSettings:
 
 
 def build_model(settings: RunSettings) -> LetreeModel:
-    return LetreeModel(
+    model = LetreeModel(
         settings.width,
         settings.correction_recurrent,
         settings.aggregations,
         settings.attention,
     )
+
+    # Node counts change every batch, so shapes are dynamic from the start
+    if settings.compile == "model":
+        # In place, so the state_dict keys stay those of a plain model
+        model.compile(dynamic=True, mode=settings.compile_mode)
+    elif settings.compile == "step":
+        model.update = torch.compile(
+            model.update, dynamic=True, mode=settings.compile_mode
+        )
+    elif settings.compile != "none":
+        raise ValueError(f"Unknown compile setting: {settings.compile!r}.")
+    return model
 
 
 def select_device() -> torch.device:
@@ -224,6 +239,9 @@ def fit(settings: RunSettings, run_directory: str | Path, resume: bool = False) 
     np.random.seed(settings.seed)
     torch.manual_seed(settings.seed)
     device = select_device()
+
+    if settings.precision == "tf32":
+        torch.set_float32_matmul_precision("high")
 
     def loader(split: str, shuffle: bool):
         dataset = ObservationDataset(

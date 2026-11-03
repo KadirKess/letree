@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 import pytest
 import torch
@@ -117,6 +118,26 @@ def test_validation_reports_every_noise_kind_on_the_same_images(make_dataset):
     assert summary[f"noisy/{joint}"] == pytest.approx(
         sum(summary[f"{kind}/{joint}"] for kind in kinds) / 4
     )
+
+
+@pytest.mark.parametrize("compile", ["model", "step"])
+def test_compiled_checkpoints_load_into_a_plain_model(compile) -> None:
+    # Compilation is lazy, so nothing is compiled until a forward pass
+    settings = RunSettings(dataset_root="", max_epochs=1, width=8, compile=compile)
+    torch.manual_seed(0)
+    compiled = build_model(settings)
+    plain = build_model(replace(settings, compile="none"))
+
+    plain.load_state_dict(compiled.state_dict())
+
+    assert list(plain.state_dict()) == list(compiled.state_dict())
+    for name, value in compiled.state_dict().items():
+        torch.testing.assert_close(plain.state_dict()[name], value)
+
+
+def test_unknown_compile_setting_is_rejected() -> None:
+    with pytest.raises(ValueError, match="compile"):
+        build_model(RunSettings(dataset_root="", max_epochs=1, compile="all"))
 
 
 def _history_entry(epoch, score, groups=("clean", "noisy")):
