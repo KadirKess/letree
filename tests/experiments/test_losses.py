@@ -7,8 +7,12 @@ from torch.nn import functional as F
 from torch_geometric.data import Batch
 
 from letree.data.graphs import to_graph
+from letree.experiments.losses import (
+    correction_losses,
+    image_mean,
+    parent_cross_entropy,
+)
 from letree.generation import SaltAndPepperNoise, SquareImageConfig
-from letree.losses import correction_losses, image_mean, parent_cross_entropy
 from letree.model import LetreeModel, Step
 
 SMALL_IMAGES = SquareImageConfig(

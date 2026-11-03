@@ -3,12 +3,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from letree.generation import CorrectionAction
-from letree.metrics import (
+from letree.experiments.metrics import (
     batch_image_metrics,
     graph_local_argmax,
     summarize_image_metrics,
 )
+from letree.generation import CorrectionAction
 
 
 def test_argmax_returns_local_ids_and_first_index_on_ties() -> None:

@@ -40,10 +40,11 @@ src/letree/
   data/             clean image sources, stored families and PyG graphs
   model.py          recurrent network with its parent and action readouts
   attention.py      graph-local parent attention, dense and FlexAttention
-  losses.py         parent and action losses averaged per image
-  metrics.py        accuracies and baselines per image
-  train.py          epoch loop, checkpoint selection and test evaluation
   correction/       decoding predictions into the ε-tree and scoring it
+  experiments/      running the model over a dataset
+    losses.py       parent and action losses averaged per image
+    metrics.py      accuracies and baselines per image
+    train.py        epoch loop, checkpoint selection and test evaluation
 scripts/            dataset generation and training entry points
 notebooks/          Colab notebook that generates a dataset and trains
 tests/              tests mirroring the package layout

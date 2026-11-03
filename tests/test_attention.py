@@ -10,7 +10,7 @@ from letree.attention import (
     readable_graph_attention,
     same_graph_block_mask,
 )
-from letree.losses import correction_losses
+from letree.experiments.losses import correction_losses
 from letree.model import LetreeModel
 
 # Without CUDA, Flex runs uncompiled on CPU and warns that it builds the scores

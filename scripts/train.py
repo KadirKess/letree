@@ -5,7 +5,7 @@ uv run python scripts/train.py DATASET RUN_DIRECTORY --max-epochs N
 
 import argparse
 
-from letree.train import RunSettings, fit
+from letree.experiments.train import RunSettings, fit
 
 
 def parse_arguments() -> argparse.Namespace:

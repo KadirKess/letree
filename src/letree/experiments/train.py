@@ -17,8 +17,8 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 
 from letree.data.graphs import ObservationDataset, make_loader
-from letree.losses import correction_losses
-from letree.metrics import batch_image_metrics, summarize_image_metrics
+from letree.experiments.losses import correction_losses
+from letree.experiments.metrics import batch_image_metrics, summarize_image_metrics
 from letree.model import LetreeModel
 
 SELECTION_METRIC = "all/joint_correction_accuracy/image_mean"

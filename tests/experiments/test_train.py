@@ -5,10 +5,10 @@ import torch
 from torch_geometric.data import Batch
 
 from letree.data.graphs import to_graph
+from letree.experiments.losses import correction_losses
+from letree.experiments.train import SELECTION_METRIC, RunSettings, epoch_report, fit
 from letree.generation import SaltAndPepperNoise, SquareImageConfig
-from letree.losses import correction_losses
 from letree.model import LetreeModel
-from letree.train import SELECTION_METRIC, RunSettings, epoch_report, fit
 
 SMALL_IMAGES = SquareImageConfig(
     height=16, width=16, min_squares=2, max_squares=4, min_side=2, max_side=8
@@ -134,7 +134,9 @@ def test_resumed_run_matches_an_uninterrupted_one(
     dataset_root, tmp_path, monkeypatch
 ) -> None:
     # GPU kernels such as scatter can be nondeterministic, so compare on the CPU
-    monkeypatch.setattr("letree.train.select_device", lambda: torch.device("cpu"))
+    monkeypatch.setattr(
+        "letree.experiments.train.select_device", lambda: torch.device("cpu")
+    )
     fit(_settings(dataset_root, 2), tmp_path / "whole")
     fit(_settings(dataset_root, 1), tmp_path / "split")
     fit(_settings(dataset_root, 2), tmp_path / "split", resume=True)
