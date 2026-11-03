@@ -1,4 +1,4 @@
-"""A training run: its settings, epochs, checkpoint selection and test result."""
+"""A training run: its settings, epochs and checkpoint selection on validation."""
 
 import json
 import random
@@ -211,10 +211,8 @@ def git_revision() -> str | None:
         return None
 
 
-def fit(
-    settings: RunSettings, run_directory: str | Path, resume: bool = False
-) -> dict[str, float]:
-    """Train, keep the best validation checkpoint and evaluate test once."""
+def fit(settings: RunSettings, run_directory: str | Path, resume: bool = False) -> dict:
+
     run_directory = Path(run_directory)
     run_directory.mkdir(parents=True, exist_ok=True)
     last_path = run_directory / "last.pt"
@@ -320,7 +318,4 @@ def fit(
 
     if not best_path.exists():
         raise RuntimeError("No epoch produced a finite validation score.")
-    model.load_state_dict(torch.load(best_path, map_location=device)["model"])
-    test = evaluate(model, loader("test", shuffle=False), settings, device)
-    write_json(run_directory / "test.json", test)
-    return test
+    return torch.load(best_path, map_location="cpu")["history"][-1]

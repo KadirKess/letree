@@ -45,8 +45,9 @@ def main() -> None:
         num_workers=arguments.workers,
         seed=arguments.seed,
     )
-    test = fit(settings, arguments.run_directory, resume=arguments.resume)
-    for name, value in test.items():
+    best = fit(settings, arguments.run_directory, resume=arguments.resume)
+    print(f"best epoch {best['epoch']}")
+    for name, value in best["validation"].items():
         print(f"{name}: {value}")
 
 

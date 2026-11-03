@@ -41,7 +41,8 @@ def test_all_three_losses_fall_on_a_few_graphs(square_family) -> None:
 
 @pytest.fixture
 def dataset_root(make_dataset):
-    return make_dataset({"train": 3, "val": 1, "test": 1}, NOISES, 2, base_seed=2)
+    # No test split, so a run that reads test fails
+    return make_dataset({"train": 3, "val": 1}, NOISES, 2, base_seed=2)
 
 
 def _settings(root, max_epochs):
@@ -59,16 +60,22 @@ def test_fit_writes_run_records_and_resumes(dataset_root, tmp_path) -> None:
     run = tmp_path / "run"
 
     fit(_settings(dataset_root, 2), run)
-    test = fit(_settings(dataset_root, 3), run, resume=True)
+    best = fit(_settings(dataset_root, 3), run, resume=True)
 
     history = json.loads((run / "history.json").read_text())
     assert [entry["epoch"] for entry in history] == [0, 1, 2]
     settings = json.loads((run / "settings.json").read_text())
     assert settings["settings"]["observed_steps"] == 2
     assert settings["dataset_manifest"]["split_sample_counts"]["train"] == 3
-    assert json.loads((run / "test.json").read_text()) == test
-    assert test["all/images"] == 3
-    assert {"best.pt", "last.pt"} <= {path.name for path in run.iterdir()}
+    scores = [entry["validation"][SELECTION_METRIC] for entry in history]
+    assert best == history[scores.index(max(scores))]
+    assert best["validation"]["all/images"] == 3
+    assert {path.name for path in run.iterdir()} == {
+        "settings.json",
+        "history.json",
+        "best.pt",
+        "last.pt",
+    }
 
 
 def _history_entry(epoch, score, groups=("clean", "noisy")):

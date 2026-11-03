@@ -44,7 +44,7 @@ src/letree/
   experiments/      running the model over a dataset
     losses.py       parent and action losses averaged per image
     metrics.py      accuracies and baselines per image
-    train.py        epoch loop, checkpoint selection and test evaluation
+    train.py        epoch loop and checkpoint selection on validation
 scripts/            dataset generation and training entry points
 notebooks/          Colab notebook that generates a dataset and trains
 tests/              tests mirroring the package layout
