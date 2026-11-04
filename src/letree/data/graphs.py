@@ -78,6 +78,8 @@ class ObservationDataset(Dataset):
         observation = load_observation(*self.items[item])
         graph = to_graph(observation.tree_image, observation.targets)
         graph.corruption = observation.noise
+        # Lets evaluation find the stored observation of each graph in a batch
+        graph.item = item
         return graph
 
 

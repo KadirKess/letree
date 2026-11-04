@@ -3,8 +3,9 @@ import pytest
 
 from letree.component_tree import ComponentTreeKind
 from letree.correction.decoder import decode_correction
-from letree.correction.scores import (
+from letree.evaluation.scores import (
     CorrectionScores,
+    pixel_errors,
     score_correction,
     tree_correction,
 )
@@ -245,3 +246,16 @@ def test_oracle_scores_agree_with_stored_diagnostics(kind):
 
     # The random images must include lost roots, or the flag check means little
     assert root_lost_count > 0
+
+
+def test_pixel_errors_of_merging_everything():
+    errors = pixel_errors(
+        np.zeros((2, 3), dtype=np.int64),
+        np.zeros((2, 3), dtype=np.int64),
+        CLEAN_LABELS,
+        CLEAN_DEPTH,
+    )
+    # The single group is matched to zone 0, so the pixels of zone 1 are wrong
+    np.testing.assert_array_equal(errors.misassigned, [[0, 0, 0], [1, 1, 1]])
+    np.testing.assert_array_equal(errors.depth_difference, [[0, 0, 0], [1, 1, 1]])
+    np.testing.assert_array_equal(errors.lost_clean_zones, [False, True])
