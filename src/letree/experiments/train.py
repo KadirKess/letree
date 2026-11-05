@@ -21,7 +21,9 @@ from letree.experiments.losses import correction_losses
 from letree.experiments.metrics import batch_image_metrics, summarize_image_metrics
 from letree.model import LetreeModel
 
-SELECTION_METRIC = "all/joint_correction_accuracy/image_mean"
+SELECTION_METRIC = "selection"
+# Checkpoints are chosen on the corrective losses only, lower is better
+SELECTION_PARTS = ("loss/set_pointer", "loss/contraction", "loss/increment")
 
 # Colab redraws subprocess output slowly, so refresh the bars at most every few seconds
 PROGRESS_SECONDS = 5
@@ -93,11 +95,12 @@ def train_epoch(model, loader, optimizer, settings, device) -> dict[str, float]:
         output = model(
             data.x,
             data.edge_index,
+            data.rag_edge_index,
             data.ptr,
             settings.observed_steps,
             settings.correction_steps,
         )
-        losses = correction_losses(output, data)
+        losses = correction_losses(output, data, settings.attention)
 
         optimizer.zero_grad()
         sum(losses.values()).backward()
@@ -130,11 +133,12 @@ def evaluate(model, loader, settings, device) -> dict[str, float]:
         output = model(
             data.x,
             data.edge_index,
+            data.rag_edge_index,
             data.ptr,
             settings.observed_steps,
             settings.correction_steps,
         )
-        for name, value in correction_losses(output, data).items():
+        for name, value in correction_losses(output, data, settings.attention).items():
             loss_totals[name] += value.item() * data.num_graphs
         graph_count += data.num_graphs
 
@@ -152,18 +156,22 @@ def evaluate(model, loader, settings, device) -> dict[str, float]:
     summary = summarize_image_metrics(per_image)
     for name, total in loss_totals.items():
         summary[f"loss/{name}"] = total / graph_count
+    summary[SELECTION_METRIC] = sum(summary[name] for name in SELECTION_PARTS)
     for name, length in largest.items():
         summary[f"max_length/{name}"] = length
     return summary
 
 
-LOSS_NAMES = ("observed_parent", "corrective_parent", "action")
+LOSS_NAMES = ("observed_parent", "set_pointer", "contraction", "increment")
+LOSS_COLUMNS = ("observed", "pointer", "contraction", "increment")
 ACCURACY_NAMES = (
     "observed_parent_accuracy",
-    "corrective_parent_accuracy",
-    "action_accuracy",
-    "joint_correction_accuracy",
+    "set_pointer_accuracy",
+    "increment_accuracy",
+    "joint_accuracy",
+    "edge_accuracy",
 )
+ACCURACY_COLUMNS = ("observed", "pointer", "increment", "joint", "edge")
 
 
 def epoch_report(history: list[dict], stale: int, patience: int) -> str:
@@ -181,16 +189,14 @@ def epoch_report(history: list[dict], stale: int, patience: int) -> str:
         f"epoch {entry['epoch']}  lr {entry['learning_rate']:.1e}  "
         f"{entry['seconds']:.0f}s",
         f"  {'loss':<24}"
-        + "".join(f"{name:>12}" for name in ("observed", "corrective", "action"))
+        + "".join(f"{name:>12}" for name in LOSS_COLUMNS)
         + f"{'total':>12}",
         row(
             "train (epoch mean)", [train[n] for n in LOSS_NAMES] + [sum(train.values())]
         ),
         row("val", validation_losses + [sum(validation_losses)]),
         f"  {'accuracy, image mean':<24}"
-        + "".join(
-            f"{name:>12}" for name in ("observed", "corrective", "action", "joint")
-        ),
+        + "".join(f"{name:>12}" for name in ACCURACY_COLUMNS),
     ]
     for group in ("clean", "noisy"):
         if f"{group}/images" in validation:
@@ -210,7 +216,7 @@ def epoch_report(history: list[dict], stale: int, patience: int) -> str:
         else f"{best['validation'][SELECTION_METRIC]:.4f} at epoch {best['epoch']}"
     )
     lines.append(
-        f"  selection (val joint, image mean) {validation[SELECTION_METRIC]:.4f}  "
+        f"  selection (val corrective loss) {validation[SELECTION_METRIC]:.4f}  "
         f"best {best_text}  stale {stale}/{patience}"
     )
     return "\n".join(lines)
@@ -276,12 +282,12 @@ def fit(settings: RunSettings, run_directory: str | Path, resume: bool = False) 
     )
     scheduler = ReduceLROnPlateau(
         optimizer,
-        mode="max",
+        mode="min",
         factor=settings.plateau_factor,
         patience=settings.plateau_patience,
     )
 
-    first_epoch, best, stale, history = 0, -inf, 0, []
+    first_epoch, best, stale, history = 0, inf, 0, []
     if resume and last_path.exists():
         state = torch.load(last_path, map_location=device)
         model.load_state_dict(state["model"])
@@ -316,7 +322,7 @@ def fit(settings: RunSettings, run_directory: str | Path, resume: bool = False) 
         score = validation[SELECTION_METRIC]
         scheduler.step(score)
 
-        improved = score > best
+        improved = score < best
         best, stale = (score, 0) if improved else (best, stale + 1)
         history.append(
             {

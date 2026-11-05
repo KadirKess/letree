@@ -1,306 +1,270 @@
-import inspect
-
 import numpy as np
 import pytest
+from scipy import ndimage
 
 from letree.component_tree import ComponentTreeKind
 from letree.correction.decoder import (
     CorrectionDecodeError,
     DecodeFailureReason,
-    decode_correction,
+    contraction_groups,
+    decode_groups,
+    group_increments,
+    hard_vote,
+    soft_vote,
+    tree_pixel_depth,
 )
-from letree.generation import CorrectionAction, build_generation_sample
+from letree.generation import (
+    AdditiveGaussianNoise,
+    GenerationStage,
+    SaltAndPepperNoise,
+    SquareImageConfig,
+    build_generation_sample,
+    derive_rng,
+    generate_square_image,
+)
 
-MERGE = CorrectionAction.MERGE
-KEEP_ZERO = CorrectionAction.KEEP_ZERO
-KEEP_ONE = CorrectionAction.KEEP_ONE
+# The worked example of the zone plan. A one-row image [0 1 5 4 0 0] gives
+# observed nodes o0 to o4 on a path, o4 covering the last two pixels
+EDGES = np.array([[0, 1, 2, 3], [1, 2, 3, 4]])
+LABEL_MAP = np.array([[0, 1, 2, 3, 4, 4]])
+ZONE = np.array([0, 0, 2, 2, 4])
+INCREMENT = np.array([0, 0, 1, 1, 0])
+ORACLE_CONTRACTED = np.array([True, False, True, False])
+# Every parent zone is A, whose smallest node is o0
+ORACLE_POINTERS = np.zeros(5, dtype=np.int64)
 
-
-def _ints(values) -> np.ndarray:
-    return np.asarray(values, dtype=np.int64)
-
-
-def _row(node_count: int) -> np.ndarray:
-    # One pixel per observed node, so pixel depth reads off node depth directly
-    return np.arange(node_count, dtype=np.int64).reshape(1, node_count)
-
-
-def _assert_decoded(decoded, **expected) -> None:
-    for name, values in expected.items():
-        actual = getattr(decoded, name)
-        assert actual.dtype == np.int64, name
-        np.testing.assert_array_equal(actual, _ints(values), err_msg=name)
-
-
-def _assert_fails(reason, parents, actions, label_map) -> None:
-    with pytest.raises(CorrectionDecodeError) as caught:
-        decode_correction(parents, actions, label_map)
-    assert caught.value.reason == reason
+SMALL_IMAGES = SquareImageConfig(
+    height=16, width=16, min_squares=2, max_squares=4, min_side=2, max_side=8
+)
 
 
-# The five-node contraction worked through in the decoder guide
-WORKED_PARENTS = _ints([0, 0, 1, 2, 3])
-WORKED_ACTIONS = _ints([KEEP_ZERO, KEEP_ONE, MERGE, MERGE, KEEP_ZERO])
-
-
-def test_single_node_is_one_root_group_at_depth_zero():
-    label_map = np.zeros((3, 4), dtype=np.int64)
-
-    decoded = decode_correction(_ints([0]), _ints([KEEP_ZERO]), label_map)
-
-    _assert_decoded(
-        decoded,
-        representatives=[0],
-        observed_to_output=[0],
-        parents=[0],
-        increments=[0],
-        depths=[0],
-        pixel_depth=np.zeros((3, 4)),
+def _decode_hard(contracted, pointers, increment, edges=EDGES, label_map=LABEL_MAP):
+    groups = contraction_groups(edges, contracted, increment.size)
+    return decode_groups(
+        groups,
+        hard_vote(pointers, groups),
+        group_increments(increment.astype(float), groups),
+        label_map,
     )
-
-
-def test_equal_level_link_keeps_separate_node_at_parent_depth():
-    # Max-tree of [10, 20, 10]. Node 2 is a separate zone at the root level.
-    decoded = decode_correction(
-        _ints([0, 0, 0]), _ints([KEEP_ZERO, KEEP_ONE, KEEP_ZERO]), _row(3)
-    )
-
-    _assert_decoded(
-        decoded,
-        representatives=[0, 1, 2],
-        observed_to_output=[0, 1, 2],
-        parents=[0, 0, 0],
-        increments=[0, 1, 0],
-        depths=[0, 1, 0],
-        pixel_depth=[[0, 1, 0]],
-    )
-
-
-def test_worked_contraction_matches_every_hand_calculated_array():
-    decoded = decode_correction(WORKED_PARENTS, WORKED_ACTIONS, _row(5))
-
-    _assert_decoded(
-        decoded,
-        representatives=[0, 1, 4],
-        observed_to_output=[0, 1, 1, 1, 2],
-        parents=[0, 0, 1],
-        increments=[0, 1, 0],
-        depths=[0, 1, 1],
-        pixel_depth=[[0, 1, 1, 1, 1]],
-    )
-
-
-def test_nonzero_root_maps_parents_through_output_identifiers():
-    # Copying observed identifiers or assuming root zero both fail here
-    decoded = decode_correction(
-        _ints([2, 0, 2]), _ints([MERGE, KEEP_ONE, KEEP_ZERO]), _row(3)
-    )
-
-    _assert_decoded(
-        decoded,
-        representatives=[1, 2],
-        observed_to_output=[1, 0, 1],
-        parents=[1, 1],
-        increments=[1, 0],
-        depths=[1, 0],
-        pixel_depth=[[0, 1, 0]],
-    )
-
-
-def test_several_fragments_join_a_nonadjacent_representative():
-    decoded = decode_correction(
-        _ints([0, 0, 0]), _ints([KEEP_ZERO, MERGE, MERGE]), _row(3)
-    )
-
-    _assert_decoded(
-        decoded,
-        representatives=[0],
-        observed_to_output=[0, 0, 0],
-        parents=[0],
-        increments=[0],
-        depths=[0],
-        pixel_depth=[[0, 0, 0]],
-    )
-
-
-# Recursion would exceed Python's default limit, and rescanning each chain
-# suffix would make these quadratic in the chain length
-LONG_CHAIN = 20_000
-
-
-def _chain_parents(node_count: int) -> np.ndarray:
-    parents = np.arange(-1, node_count - 1, dtype=np.int64)
-    parents[0] = 0
-    return parents
-
-
-def test_long_merge_chain_contracts_to_the_root():
-    actions = np.full(LONG_CHAIN, MERGE, dtype=np.int64)
-    actions[0] = KEEP_ZERO
-
-    decoded = decode_correction(_chain_parents(LONG_CHAIN), actions, _row(LONG_CHAIN))
-
-    _assert_decoded(
-        decoded,
-        representatives=[0],
-        observed_to_output=np.zeros(LONG_CHAIN),
-        depths=[0],
-        pixel_depth=np.zeros((1, LONG_CHAIN)),
-    )
-
-
-def test_long_retained_chain_reaches_depth_n_minus_one():
-    actions = np.full(LONG_CHAIN, KEEP_ONE, dtype=np.int64)
-    actions[0] = KEEP_ZERO
-
-    decoded = decode_correction(_chain_parents(LONG_CHAIN), actions, _row(LONG_CHAIN))
-
-    _assert_decoded(
-        decoded,
-        depths=np.arange(LONG_CHAIN),
-        pixel_depth=np.arange(LONG_CHAIN).reshape(1, LONG_CHAIN),
-    )
-
-
-def test_narrower_integer_inputs_decode_to_int64_results():
-    decoded = decode_correction(
-        WORKED_PARENTS.astype(np.int32),
-        WORKED_ACTIONS.astype(np.uint8),
-        _row(5).astype(np.int32),
-    )
-
-    _assert_decoded(decoded, depths=[0, 1, 1], pixel_depth=[[0, 1, 1, 1, 1]])
-
-
-def test_non_contiguous_label_map_views_use_their_own_indexing():
-    # Node depths for the worked example are [0, 1, 1, 1, 1]
-    stored = np.array([[0, 1], [2, 3], [4, 4]], dtype=np.int64)
-    transposed = stored.T
-    reversed_row = np.array([[0, 1, 2, 3, 4, 4]], dtype=np.int64)[:, ::-1]
-    assert not transposed.flags.c_contiguous
-    assert not reversed_row.flags.c_contiguous
-
-    np.testing.assert_array_equal(
-        decode_correction(WORKED_PARENTS, WORKED_ACTIONS, transposed).pixel_depth,
-        [[0, 1, 1], [1, 1, 1]],
-    )
-    np.testing.assert_array_equal(
-        decode_correction(WORKED_PARENTS, WORKED_ACTIONS, reversed_row).pixel_depth,
-        [[1, 1, 1, 1, 1, 0]],
-    )
-
-
-def test_disconnected_output_group_is_a_valid_decode():
-    # Nodes 1 and 3 are not adjacent in the row but form one output group
-    decoded = decode_correction(
-        _ints([0, 0, 0, 1]), _ints([KEEP_ZERO, KEEP_ONE, KEEP_ZERO, MERGE]), _row(4)
-    )
-
-    _assert_decoded(
-        decoded,
-        observed_to_output=[0, 1, 2, 1],
-        pixel_depth=[[0, 1, 0, 1]],
-    )
-
-
-def _pixel_partition(observed_to_output, label_map) -> set[frozenset]:
-    groups = {}
-    for pixel, group in enumerate(observed_to_output[label_map].ravel()):
-        groups.setdefault(int(group), set()).add(pixel)
-    return {frozenset(pixels) for pixels in groups.values()}
-
-
-def test_renumbering_observed_nodes_preserves_pixel_groups_and_depth():
-    label_map = np.array([[0, 1, 1, 2], [3, 3, 4, 4]], dtype=np.int64)
-    # new_id[old] is the new identifier of old observed node old
-    new_id = _ints([3, 0, 4, 2, 1])
-    renumbered_parents = np.empty(5, dtype=np.int64)
-    renumbered_actions = np.empty(5, dtype=np.int64)
-    renumbered_parents[new_id] = new_id[WORKED_PARENTS]
-    renumbered_actions[new_id] = WORKED_ACTIONS
-    renumbered_labels = new_id[label_map]
-
-    original = decode_correction(WORKED_PARENTS, WORKED_ACTIONS, label_map)
-    renumbered = decode_correction(
-        renumbered_parents, renumbered_actions, renumbered_labels
-    )
-
-    np.testing.assert_array_equal(renumbered.pixel_depth, original.pixel_depth)
-    assert _pixel_partition(
-        renumbered.observed_to_output, renumbered_labels
-    ) == _pixel_partition(original.observed_to_output, label_map)
-
-
-def test_decoder_reads_only_pointers_actions_and_observed_labels():
-    # Intensities, clean records and noise settings cannot reach the decoder
-    parameters = inspect.signature(decode_correction).parameters
-    assert list(parameters) == ["corrective_parents", "actions", "observed_label_map"]
 
 
 @pytest.mark.parametrize(
-    ("kind", "image", "expected_depth"),
+    ("contracted", "expected"),
     [
-        (ComponentTreeKind.MAX_TREE, [[10, 20, 10]], [[0, 1, 0]]),
-        # The min-tree root is the brightest level, and darker zones lie deeper
-        (ComponentTreeKind.MIN_TREE, [[20, 10, 20]], [[0, 1, 0]]),
-        (ComponentTreeKind.MIN_TREE, [[10, 20, 10]], [[1, 0, 1]]),
-        (ComponentTreeKind.MAX_TREE, [[10, 20], [30, 20]], [[0, 1], [2, 1]]),
+        (ORACLE_CONTRACTED, [0, 0, 1, 1, 2]),
+        ([False] * 4, [0, 1, 2, 3, 4]),
+        ([True] * 4, [0, 0, 0, 0, 0]),
     ],
+    ids=["oracle", "none", "all"],
 )
-def test_perfect_clean_targets_decode_to_hand_calculated_depth(
-    kind, image, expected_depth
-):
-    # The clean observation is its own clean reference. Its depth counts strict
-    # level changes along the tree, one per change whatever its size.
-    sample = build_generation_sample(np.asarray(image, dtype=np.uint8), kind)
-    targets = sample.correction_targets
+def test_groups_of_the_worked_example(contracted, expected):
+    groups = contraction_groups(EDGES, np.array(contracted), 5)
+    assert groups.dtype == np.int64
+    assert groups.tolist() == expected
 
-    decoded = decode_correction(
-        targets.corrective_parents,
-        targets.actions,
-        sample.observed.graph.label_map,
+
+def test_groups_are_numbered_by_their_smallest_node_and_isolated_nodes_stay_alone():
+    # Edges (4, 1) and (3, 4) join nodes 1, 3 and 4. Node 5 has no edge
+    edges = np.array([[4, 3, 0], [1, 4, 2]])
+    groups = contraction_groups(edges, np.array([True, True, False]), 6)
+    assert groups.tolist() == [0, 1, 2, 1, 1, 3]
+
+
+def test_hard_vote_counts_argmax_pointers_per_group_pair():
+    groups = np.array([0, 0, 1, 1, 2])
+    # o3 points into its own group and o4 at o2
+    votes = hard_vote(np.array([0, 1, 0, 2, 2]), groups)
+    assert votes.tolist() == [[2, 0, 0], [1, 1, 0], [0, 1, 0]]
+
+
+def test_soft_vote_sums_probability_mass_per_group_pair():
+    groups = np.array([0, 0, 1])
+    probabilities = np.array(
+        [
+            [0.5, 0.25, 0.25],
+            [0.1, 0.1, 0.8],
+            [0.6, 0.3, 0.1],
+        ]
     )
 
-    np.testing.assert_array_equal(decoded.pixel_depth, expected_depth)
+    votes = soft_vote(probabilities, groups)
+
+    # Group 0 sends 0.5 + 0.25 + 0.1 + 0.1 to itself and 0.25 + 0.8 to group 1
+    np.testing.assert_allclose(votes, [[0.95, 1.05], [0.9, 0.1]])
 
 
-VALID_ROW = _row(3)
-VALID_PARENTS = _ints([0, 0, 1])
-VALID_ACTIONS = _ints([KEEP_ZERO, KEEP_ONE, MERGE])
+def test_soft_and_hard_votes_agree_on_one_hot_pointers():
+    rng = np.random.default_rng(0)
+    groups = np.array([0, 1, 0, 2, 2, 1, 3])
+    pointers = rng.integers(0, 7, size=7)
+    one_hot = np.eye(7)[pointers]
+
+    np.testing.assert_array_equal(
+        soft_vote(one_hot, groups), hard_vote(pointers, groups)
+    )
 
 
-def test_valid_reference_inputs_for_the_failure_cases_decode():
-    decode_correction(VALID_PARENTS, VALID_ACTIONS, VALID_ROW)
+def test_group_increment_is_a_strict_majority_of_the_mean():
+    groups = np.array([0, 0, 1, 1, 1, 2])
+    values = np.array([1.0, 0.0, 0.9, 0.4, 0.3, 0.51])
+
+    # Group 0 ties at one half and gets 0. Group 1 has mean 1.6 / 3
+    assert group_increments(values, groups).tolist() == [0, 1, 1]
 
 
+def test_oracle_of_the_worked_example_decodes_the_clean_depth():
+    decoded = _decode_hard(ORACLE_CONTRACTED, ORACLE_POINTERS, INCREMENT)
+
+    assert decoded.groups.tolist() == [0, 0, 1, 1, 2]
+    assert decoded.parents.tolist() == [0, 0, 0]
+    assert decoded.increments.tolist() == [0, 1, 0]
+    assert decoded.depths.tolist() == [0, 1, 0]
+    assert decoded.pixel_depth.tolist() == [[0, 0, 1, 1, 0, 0]]
+
+
+def test_false_contraction_carries_the_majority_increment_into_the_merged_zone():
+    contracted = np.array([True, False, True, True])
+
+    decoded = _decode_hard(contracted, ORACLE_POINTERS, INCREMENT)
+
+    # Increments 1, 1 and 0 have mean 2 / 3, so pixels 4 and 5 move to depth 1
+    assert decoded.groups.tolist() == [0, 0, 1, 1, 1]
+    assert decoded.pixel_depth.tolist() == [[0, 0, 1, 1, 1, 1]]
+
+
+def test_two_self_parent_groups_fail_with_root_count():
+    # Group 1 votes for itself as well as group 0
+    pointers = np.array([0, 0, 2, 2, 0])
+    with pytest.raises(CorrectionDecodeError) as error:
+        _decode_hard(ORACLE_CONTRACTED, pointers, INCREMENT)
+    assert error.value.reason == DecodeFailureReason.ROOT_COUNT
+
+
+def test_groups_pointing_at_each_other_fail_with_a_cycle():
+    # Group 0 is the root, groups 1 and 2 point at each other
+    pointers = np.array([0, 0, 4, 4, 2])
+    with pytest.raises(CorrectionDecodeError) as error:
+        _decode_hard(ORACLE_CONTRACTED, pointers, INCREMENT)
+    assert error.value.reason == DecodeFailureReason.NONTRIVIAL_CYCLE
+
+
+def _threshold_depth(image, kind):
+    # Strict depth counted from threshold sets, without any tree. A pixel's depth
+    # is the number of distinct connected threshold components containing it,
+    # minus one for the root
+    components = set()
+    for level in np.unique(image):
+        active = (
+            image >= level if kind == ComponentTreeKind.MAX_TREE else image <= level
+        )
+        labels, count = ndimage.label(active)
+        for label in range(1, count + 1):
+            components.add(frozenset(np.flatnonzero(labels == label).tolist()))
+    depth = np.full(image.size, -1, dtype=np.int64)
+    for component in components:
+        depth[list(component)] += 1
+    return depth.reshape(image.shape)
+
+
+def _sample(seed, kind, noise):
+    image = generate_square_image(
+        SMALL_IMAGES, derive_rng(seed, 0, GenerationStage.SQUARE_IMAGE)
+    )
+    if noise is None:
+        return build_generation_sample(image, kind)
+    return build_generation_sample(image, kind, noise, np.random.default_rng(seed))
+
+
+@pytest.mark.parametrize("kind", list(ComponentTreeKind))
+def test_tree_pixel_depth_matches_threshold_components(kind):
+    for seed in range(5):
+        clean = _sample(seed, kind, None).clean
+        depth = tree_pixel_depth(
+            clean.component_tree.parents, clean.graph.levels, clean.graph.label_map
+        )
+        np.testing.assert_array_equal(depth, _threshold_depth(clean.image, kind))
+
+
+def _oracle(sample):
+    # Contractions from the zones, and each node points at the smallest node of
+    # its parent zone
+    targets, graph = sample.correction_targets, sample.observed.graph
+    zone, parent_zone = targets.zone, targets.parent_zone
+    edges = graph.edge_index.T
+    contracted = zone[edges[0]] == zone[edges[1]]
+    smallest_node = {}
+    for node, node_zone in enumerate(zone.tolist()):
+        smallest_node.setdefault(node_zone, node)
+    pointers = np.array([smallest_node[z] for z in parent_zone.tolist()])
+    return edges, contracted, pointers, targets.increment
+
+
+def _is_refining(sample):
+    # Every observed zone lies inside one clean zone
+    clean = sample.clean.graph.label_map.ravel()
+    observed = sample.observed.graph.label_map.ravel()
+    pairs = np.unique(np.stack((observed, clean)), axis=1)
+    return pairs.shape[1] == observed.max() + 1
+
+
+@pytest.mark.parametrize("kind", list(ComponentTreeKind))
 @pytest.mark.parametrize(
-    "parents",
-    [_ints([1, 2, 0]), _ints([0, 1, 0]), _ints([0, 1, 2])],
-    ids=["cycle_without_root", "two_roots", "three_roots"],
+    "noise",
+    [None, SaltAndPepperNoise(0.05), AdditiveGaussianNoise(standard_deviation=10.0)],
+    ids=["clean", "salt_and_pepper", "gaussian"],
 )
-def test_rejects_anything_but_one_self_parent(parents):
-    actions = _ints([KEEP_ZERO, KEEP_ZERO, KEEP_ZERO])
-    _assert_fails(DecodeFailureReason.ROOT_COUNT, parents, actions, VALID_ROW)
+def test_oracle_decodes_the_clean_depth_on_refining_observations(kind, noise):
+    checked = 0
+    for seed in range(20):
+        sample = _sample(seed, kind, noise)
+        if not _is_refining(sample):
+            continue
+        edges, contracted, pointers, increment = _oracle(sample)
+
+        decoded = _decode_hard(
+            contracted, pointers, increment, edges, sample.observed.graph.label_map
+        )
+
+        clean = sample.clean
+        expected = tree_pixel_depth(
+            clean.component_tree.parents, clean.graph.levels, clean.graph.label_map
+        )
+        np.testing.assert_array_equal(decoded.pixel_depth, expected)
+        checked += 1
+    assert checked >= 5
 
 
-@pytest.mark.parametrize("root_action", [MERGE, KEEP_ONE])
-def test_rejects_root_that_is_not_keep_zero(root_action):
-    actions = VALID_ACTIONS.copy()
-    actions[0] = root_action
-    _assert_fails(
-        DecodeFailureReason.INVALID_ROOT_ACTION, VALID_PARENTS, actions, VALID_ROW
+def test_oracle_of_a_clean_observation_keeps_every_node_and_its_tree():
+    sample = _sample(3, ComponentTreeKind.MAX_TREE, None)
+    edges, contracted, pointers, increment = _oracle(sample)
+
+    decoded = _decode_hard(
+        contracted, pointers, increment, edges, sample.observed.graph.label_map
     )
 
+    assert not contracted.any()
+    np.testing.assert_array_equal(decoded.groups, np.arange(increment.size))
+    np.testing.assert_array_equal(decoded.parents, sample.clean.component_tree.parents)
 
-@pytest.mark.parametrize(
-    "parents",
-    [_ints([0, 2, 1]), _ints([0, 2, 3, 1]), _ints([0, 2, 3, 1, 1])],
-    ids=["two_cycle", "three_cycle", "cycle_with_tail"],
-)
-def test_rejects_cycle_beside_a_valid_root(parents):
-    node_count = len(parents)
-    actions = np.full(node_count, KEEP_ONE, dtype=np.int64)
-    actions[0] = KEEP_ZERO
-    _assert_fails(
-        DecodeFailureReason.NONTRIVIAL_CYCLE, parents, actions, _row(node_count)
+
+def test_relabelling_observed_nodes_keeps_the_pixel_depth():
+    sample = _sample(7, ComponentTreeKind.MAX_TREE, SaltAndPepperNoise(0.05))
+    edges, contracted, pointers, increment = _oracle(sample)
+    label_map = sample.observed.graph.label_map
+    original = _decode_hard(contracted, pointers, increment, edges, label_map)
+
+    # New id of each old node, applied to every array that names nodes
+    new_id = np.random.default_rng(1).permutation(increment.size)
+    renamed_pointers = np.empty_like(pointers)
+    renamed_pointers[new_id] = new_id[pointers]
+    renamed_increment = np.empty_like(increment)
+    renamed_increment[new_id] = increment
+    renamed = _decode_hard(
+        contracted,
+        renamed_pointers,
+        renamed_increment,
+        new_id[edges],
+        new_id[label_map],
     )
+
+    np.testing.assert_array_equal(renamed.pixel_depth, original.pixel_depth)

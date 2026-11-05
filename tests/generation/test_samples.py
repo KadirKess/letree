@@ -21,21 +21,22 @@ def _build_reference_tree(image, kind):
 
 
 @pytest.mark.parametrize(
-    ("kind", "parents", "actions"),
+    ("kind", "parents", "increment"),
     [
-        (ComponentTreeKind.MAX_TREE, [0, 2, 0], [1, 2, 2]),
-        (ComponentTreeKind.MIN_TREE, [2, 1, 1], [2, 1, 2]),
+        (ComponentTreeKind.MAX_TREE, [0, 2, 0], [0, 1, 1]),
+        (ComponentTreeKind.MIN_TREE, [2, 1, 1], [1, 0, 1]),
     ],
 )
-def test_clean_observation_has_real_correction_targets(kind, parents, actions) -> None:
+def test_clean_observation_has_real_correction_targets(kind, parents, increment):
     image = np.array([[10, 10, 30], [10, 20, 30]], dtype=np.uint8)
     sample = build_generation_sample(image, kind, tree_builder=_build_reference_tree)
 
     assert sample.clean.image is image
     assert sample.observed is sample.clean
     assert sample.clean.component_tree.kind == kind
-    np.testing.assert_array_equal(sample.correction_targets.corrective_parents, parents)
-    np.testing.assert_array_equal(sample.correction_targets.actions, actions)
+    np.testing.assert_array_equal(sample.correction_targets.zone, [0, 1, 2])
+    np.testing.assert_array_equal(sample.correction_targets.parent_zone, parents)
+    np.testing.assert_array_equal(sample.correction_targets.increment, increment)
     np.testing.assert_array_equal(sample.correction_diagnostics.overlap_purity, 1.0)
     np.testing.assert_array_equal(
         sample.correction_diagnostics.overlap_clean_zone_count, 1
@@ -66,10 +67,8 @@ def test_corrupted_sample_keeps_clean_and_observed_representations(kind) -> None
     np.testing.assert_array_equal(clean_image, [[10, 10, 30], [10, 20, 30]])
     assert sample.clean.component_tree.kind == kind
     assert sample.observed.component_tree.kind == kind
-    np.testing.assert_array_equal(
-        sample.correction_targets.corrective_parents,
-        [0],
-    )
+    np.testing.assert_array_equal(sample.correction_targets.zone, [0])
+    np.testing.assert_array_equal(sample.correction_targets.parent_zone, [0])
     np.testing.assert_allclose(sample.correction_diagnostics.overlap_purity, [0.5])
     np.testing.assert_array_equal(
         sample.correction_diagnostics.overlap_clean_zone_count,
@@ -90,12 +89,13 @@ def test_missing_clean_root_diagnostic_depends_on_requested_tree_kind() -> None:
         for kind in ComponentTreeKind
     ]
     # The only observed zone selects level 10 by pixel count. It is the max-tree
-    # root, whereas the min-tree root at level 30 has no representative.
+    # root, whereas no observed zone selects the min-tree root at level 30.
     assert samples[0].correction_diagnostics.clean_root_missing is False
     assert samples[1].correction_diagnostics.clean_root_missing is True
     for sample in samples:
-        np.testing.assert_array_equal(sample.correction_targets.corrective_parents, [0])
-        np.testing.assert_array_equal(sample.correction_targets.actions, [1])
+        np.testing.assert_array_equal(sample.correction_targets.zone, [0])
+        np.testing.assert_array_equal(sample.correction_targets.parent_zone, [0])
+        np.testing.assert_array_equal(sample.correction_targets.increment, [0])
         np.testing.assert_array_equal(
             sample.correction_diagnostics.missing_clean_zones, [False, True, True]
         )

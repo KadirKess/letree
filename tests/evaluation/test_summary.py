@@ -13,8 +13,10 @@ from letree.evaluation.summary import (
 def _record(lost, zones, pure, pure_wrong, mixed, mixed_wrong, corruption="gauss"):
     pixels = pure + mixed
     return {
-        "source": "model",
+        "source": "model_soft",
         "corruption": corruption,
+        "groups": zones,
+        "root_claims": 1,
         "valid": True,
         "failure": "",
         "exact": False,
@@ -37,8 +39,10 @@ def _record(lost, zones, pure, pure_wrong, mixed, mixed_wrong, corruption="gauss
 
 
 INVALID = {
-    "source": "model",
+    "source": "model_soft",
     "corruption": "gauss",
+    "groups": 9,
+    "root_claims": 4,
     "valid": False,
     "failure": "root_count",
     "exact": False,
@@ -59,6 +63,9 @@ def test_worked_example_reductions():
     assert summary["coverage"] == pytest.approx(2 / 3)
     assert summary["exact_recovery"] == 0
     assert summary["failures/root_count"] == 1
+    # Group and root claim counts include the failed decode
+    assert summary["groups/sample_mean"] == pytest.approx((10 + 2 + 9) / 3)
+    assert summary["root_claims/sample_mean"] == pytest.approx((1 + 1 + 4) / 3)
     assert summary["lost_clean_zones/sample_mean"] == pytest.approx(0.3)
     assert summary["lost_clean_zones/pooled"] == pytest.approx(2 / 12)
     assert summary["mixed/misassigned_pixels/sample_mean"] == pytest.approx(0.3)
@@ -72,7 +79,13 @@ def test_an_invalid_record_changes_only_coverage_and_recovery():
     with_invalid = reduce_records(EXAMPLE)
     without = reduce_records(EXAMPLE[:2])
     for name, value in without.items():
-        if name in ("samples", "coverage", "failures/root_count"):
+        if name in (
+            "samples",
+            "coverage",
+            "failures/root_count",
+            "groups/sample_mean",
+            "root_claims/sample_mean",
+        ):
             continue
         assert with_invalid[name] == pytest.approx(value), name
     assert without["coverage"] == 1
@@ -104,15 +117,15 @@ def test_summary_groups_and_strata():
     lost_root = _record(1, 10, 4000, 40, 96, 48) | {"root_lost": True}
     summary = summarize_records([clean, lost_root, INVALID])
 
-    assert summary["model/all/every/samples"] == 3
-    assert summary["model/clean/every/samples"] == 1
-    assert summary["model/noisy/every/samples"] == 2
-    assert summary["model/gauss/every/samples"] == 2
-    assert summary["model/all/refining/samples"] == 1
-    assert summary["model/all/mixed/samples"] == 2
+    assert summary["model_soft/all/every/samples"] == 3
+    assert summary["model_soft/clean/every/samples"] == 1
+    assert summary["model_soft/noisy/every/samples"] == 2
+    assert summary["model_soft/gauss/every/samples"] == 2
+    assert summary["model_soft/all/refining/samples"] == 1
+    assert summary["model_soft/all/mixed/samples"] == 2
     # Only valid outputs carry a root flag
-    assert summary["model/all/root_lost/samples"] == 1
-    assert summary["model/all/root_kept/samples"] == 1
+    assert summary["model_soft/all/root_lost/samples"] == 1
+    assert summary["model_soft/all/root_kept/samples"] == 1
     assert not any(key.startswith("oracle/") for key in summary)
 
 

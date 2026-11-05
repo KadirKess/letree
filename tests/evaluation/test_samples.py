@@ -40,14 +40,16 @@ def test_maps_of_chosen_samples(trained_run):
     assert [sample["key"] for sample in maps] == keys
     for sample in maps:
         oracle = sample["oracle"]
-        assert oracle["failure"] is None
+        assert oracle["failure"] == ""
         assert sample["clean_depth"].shape == (16, 16)
         if sample["corruption"] == "clean":
             np.testing.assert_array_equal(oracle["depth"], sample["clean_depth"])
             assert not oracle["misassigned"].any()
-        model_maps = sample["model"]
-        if model_maps["failure"] is None:
-            np.testing.assert_array_equal(
-                model_maps["depth_difference"],
-                np.abs(model_maps["depth"] - sample["clean_depth"]),
-            )
+        for source in ("model_soft", "model_hard"):
+            decoded = sample[source]
+            assert decoded["root_claims"] >= 0
+            if not decoded["failure"]:
+                np.testing.assert_array_equal(
+                    decoded["depth_difference"],
+                    np.abs(decoded["depth"] - sample["clean_depth"]),
+                )

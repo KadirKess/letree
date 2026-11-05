@@ -27,9 +27,12 @@ class Step:
 
 @dataclass
 class Output:
+    """Steps of both loops, with node increment and RAG edge contraction logits."""
+
     observed: list[Step]
     corrective: list[Step]
-    actions: list[Tensor]
+    increment: list[Tensor]
+    contraction: list[Tensor]
 
 
 def normalized_projection(width: int) -> nn.Sequential:
@@ -64,13 +67,16 @@ class LetreeModel(nn.Module):
         )
         self.corrective_query = normalized_projection(width)
         self.corrective_key = normalized_projection(width)
-        self.action_hidden = nn.Linear(2 * width, width)
-        self.action_output = nn.Linear(width, 3)
+        self.increment_hidden = nn.Linear(2 * width, width)
+        self.increment_output = nn.Linear(width, 1)
+        self.contraction_hidden = nn.Linear(2 * width, width)
+        self.contraction_output = nn.Linear(width, 1)
 
     def forward(
         self,
         x: Tensor,
         edge_index: Tensor,
+        rag_edge_index: Tensor,
         graph_ptr: Tensor,
         observed_steps: int,
         correction_steps: int = 0,
@@ -109,8 +115,9 @@ class LetreeModel(nn.Module):
             hidden = embedding
 
         # Corrective loop. The first readout comes before any corrective update,
-        # and actions read the corrective message, not the observed one.
-        corrective, actions = [], []
+        # and increments read the corrective message, not the observed one.
+        source, destination = rag_edge_index
+        corrective, increment, contraction = [], [], []
         for index in range(correction_steps + 1):
             if index > 0:
                 hidden = self.update(
@@ -122,12 +129,23 @@ class LetreeModel(nn.Module):
                 )
             step = attend(hidden, self.corrective_query, self.corrective_key)
             context = torch.relu(
-                self.action_hidden(torch.cat((hidden, step.message), 1))
+                self.increment_hidden(torch.cat((hidden, step.message), 1))
             )
-            corrective.append(step)
-            actions.append(self.action_output(context))
 
-        return Output(observed, corrective, actions)
+            corrective.append(step)
+            increment.append(self.increment_output(context).squeeze(1))
+
+            # Each RAG edge is scored once. The sum and absolute difference make
+            # the score the same whichever end comes first
+            first, second = hidden[source], hidden[destination]
+            pair = torch.cat((first + second, (first - second).abs()), 1)
+            contraction.append(
+                self.contraction_output(
+                    torch.relu(self.contraction_hidden(pair))
+                ).squeeze(1)
+            )
+
+        return Output(observed, corrective, increment, contraction)
 
     def update(
         self,

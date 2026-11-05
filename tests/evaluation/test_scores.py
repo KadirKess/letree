@@ -2,13 +2,9 @@ import numpy as np
 import pytest
 
 from letree.component_tree import ComponentTreeKind
-from letree.correction.decoder import decode_correction
-from letree.evaluation.scores import (
-    CorrectionScores,
-    pixel_errors,
-    score_correction,
-    tree_correction,
-)
+from letree.correction.decoder import decode_groups, tree_pixel_depth
+from letree.evaluation.records import oracle_votes
+from letree.evaluation.scores import CorrectionScores, pixel_errors, score_correction
 from letree.generation import derive_correction_targets
 from letree.generation.samples import _build_production_tree
 
@@ -19,10 +15,16 @@ def _ints(values) -> np.ndarray:
 
 def _tree_depth(image, kind):
     graph, tree = _build_production_tree(np.asarray(image, dtype=np.uint8), kind)
-    decoded = decode_correction(
-        *tree_correction(tree.parents, graph.levels), graph.label_map
+    return graph, tree, tree_pixel_depth(tree.parents, graph.levels, graph.label_map)
+
+
+def _oracle(clean_graph, clean_tree, observed_graph):
+    targets, diagnostics = derive_correction_targets(
+        clean_graph, clean_tree, observed_graph
     )
-    return graph, tree, decoded
+    groups, votes, increments = oracle_votes(observed_graph, targets)
+    decoded = decode_groups(groups, votes, increments, observed_graph.label_map)
+    return groups[observed_graph.label_map], decoded.pixel_depth, diagnostics
 
 
 def _root(parents) -> int:
@@ -45,17 +47,9 @@ def _assert_scores(scores, **expected) -> None:
         (ComponentTreeKind.MIN_TREE, [[1, 0, 1]]),
     ],
 )
-def test_tree_correction_decodes_to_tree_depth(kind, depth):
-    _, _, decoded = _tree_depth([[10, 20, 10]], kind)
-    np.testing.assert_array_equal(decoded.pixel_depth, depth)
-
-
-def test_tree_correction_keeps_parents_and_marks_level_changes():
-    parents, actions = tree_correction(_ints([0, 0, 1, 1]), _ints([10, 20, 20, 30]))
-    assert parents.dtype == np.int64 and actions.dtype == np.int64
-    np.testing.assert_array_equal(parents, [0, 0, 1, 1])
-    # Root and equal-level link stay at depth, level changes add one
-    np.testing.assert_array_equal(actions, [1, 2, 1, 2])
+def test_tree_pixel_depth_of_a_bump(kind, depth):
+    _, _, pixel_depth = _tree_depth([[10, 20, 10]], kind)
+    np.testing.assert_array_equal(pixel_depth, depth)
 
 
 # Clean [[10, 10, 10], [20, 20, 20]] and observed [[11, 15, 12], [21, 15, 22]],
@@ -104,23 +98,25 @@ def test_worked_example_observed_tree_baseline():
 
 def test_worked_example_through_production_pipeline():
     kind = ComponentTreeKind.MAX_TREE
-    clean_graph, clean_tree, clean = _tree_depth([[10, 10, 10], [20, 20, 20]], kind)
-    observed_graph, observed_tree, baseline = _tree_depth(
-        [[11, 15, 12], [21, 15, 22]], kind
+    clean_graph, clean_tree, clean_depth = _tree_depth(
+        [[10, 10, 10], [20, 20, 20]], kind
     )
-    targets, _ = derive_correction_targets(clean_graph, clean_tree, observed_graph)
-    oracle = decode_correction(
-        targets.corrective_parents, targets.actions, observed_graph.label_map
-    )
-    np.testing.assert_array_equal(clean.pixel_depth, CLEAN_DEPTH)
-    np.testing.assert_array_equal(oracle.pixel_depth, [[0, 0, 0], [1, 0, 1]])
-    np.testing.assert_array_equal(baseline.pixel_depth, [[0, 2, 1], [3, 2, 3]])
+    observed_graph, _, baseline_depth = _tree_depth([[11, 15, 12], [21, 15, 22]], kind)
+    oracle_groups, oracle_depth, _ = _oracle(clean_graph, clean_tree, observed_graph)
+    np.testing.assert_array_equal(clean_depth, CLEAN_DEPTH)
+    np.testing.assert_array_equal(oracle_depth, [[0, 0, 0], [1, 0, 1]])
+    np.testing.assert_array_equal(baseline_depth, [[0, 2, 1], [3, 2, 3]])
+    # The 15 zone ties between both clean zones and goes to the top one, so it
+    # contracts with 11 and 12. The two 20 pieces are not adjacent and stay apart
+    top = oracle_groups[0, 0]
+    assert (oracle_groups[0] == top).all() and oracle_groups[1, 1] == top
+    assert len({top, oracle_groups[1, 0], oracle_groups[1, 2]}) == 3
 
     scores = score_correction(
-        baseline.observed_to_output[observed_graph.label_map],
-        baseline.pixel_depth,
+        observed_graph.label_map,
+        baseline_depth,
         clean_graph.label_map,
-        clean.pixel_depth,
+        clean_depth,
         _root(clean_tree.parents),
     )
     assert scores.depth_mae == pytest.approx(8 / 6)
@@ -211,23 +207,20 @@ def test_oracle_scores_agree_with_stored_diagnostics(kind):
     rng = np.random.default_rng(20261026)
     root_lost_count = 0
     for _ in range(100):
-        clean_graph, clean_tree, clean = _tree_depth(
+        clean_graph, clean_tree, clean_depth = _tree_depth(
             rng.choice(np.array([10, 40, 80], dtype=np.uint8), size=(5, 6)), kind
         )
         observed_graph, _ = _build_production_tree(
             rng.choice(np.array([0, 10, 40, 80], dtype=np.uint8), size=(5, 6)), kind
         )
-        targets, diagnostics = derive_correction_targets(
+        groups, pixel_depth, diagnostics = _oracle(
             clean_graph, clean_tree, observed_graph
         )
-        oracle = decode_correction(
-            targets.corrective_parents, targets.actions, observed_graph.label_map
-        )
         scores = score_correction(
-            oracle.observed_to_output[observed_graph.label_map],
-            oracle.pixel_depth,
+            groups,
+            pixel_depth,
             clean_graph.label_map,
-            clean.pixel_depth,
+            clean_depth,
             _root(clean_tree.parents),
         )
 

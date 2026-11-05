@@ -19,8 +19,9 @@ class Graph(Data):
     """One observed flat-zone graph and its targets."""
 
     def __inc__(self, key, value, *args, **kwargs):
-        # Parent targets are local to their graph, so batching must not shift them
-        if key in {"observed_parents", "corrective_parents"}:
+        # Observed parents and clean zone ids are local to their graph, so batching
+        # must not shift them. The RAG edges are node ids and are shifted.
+        if key in {"observed_parents", "zone", "parent_zone"}:
             return 0
         return super().__inc__(key, value, *args, **kwargs)
 
@@ -37,20 +38,22 @@ def to_graph(tree_image: TreeImage, targets: CorrectionTargets) -> Graph:
         )
     )
     node_count = graph.levels.size
-    edge_index = torch.as_tensor(graph.edge_index.T, dtype=torch.int64)
-    edge_index = to_undirected(edge_index, num_nodes=node_count)
+    # Message passing reads both directions and each node itself. The contraction
+    # head scores every RAG edge once.
+    rag_edge_index = torch.as_tensor(graph.edge_index.T, dtype=torch.int64)
+    edge_index = to_undirected(rag_edge_index, num_nodes=node_count)
     edge_index, _ = add_remaining_self_loops(edge_index, num_nodes=node_count)
 
     return Graph(
         x=torch.as_tensor(features, dtype=torch.float32),
         edge_index=edge_index,
+        rag_edge_index=rag_edge_index,
         observed_parents=torch.as_tensor(
             tree_image.component_tree.parents, dtype=torch.int64
         ),
-        corrective_parents=torch.as_tensor(
-            targets.corrective_parents, dtype=torch.int64
-        ),
-        correction_actions=torch.as_tensor(targets.actions, dtype=torch.int64),
+        zone=torch.as_tensor(targets.zone, dtype=torch.int64),
+        parent_zone=torch.as_tensor(targets.parent_zone, dtype=torch.int64),
+        increment=torch.as_tensor(targets.increment, dtype=torch.int64),
         num_nodes=node_count,
     )
 

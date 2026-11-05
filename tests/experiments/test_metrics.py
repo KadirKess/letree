@@ -8,7 +8,6 @@ from letree.experiments.metrics import (
     graph_local_argmax,
     summarize_image_metrics,
 )
-from letree.generation import CorrectionAction
 
 
 def test_argmax_returns_local_ids_and_first_index_on_ties() -> None:
@@ -22,19 +21,19 @@ def test_argmax_returns_local_ids_and_first_index_on_ties() -> None:
     assert tied.tolist() == [False, False, True, True, False]
 
 
-def _metric_batch(values, node_counts, corruption):
+def _metric_batch(values, node_counts, corruption, edge_counts=None):
     names = (
         "observed_parent_accuracy",
-        "corrective_parent_accuracy",
-        "action_accuracy",
-        "joint_correction_accuracy",
-        "copy_observed_baseline",
-        "always_merge_baseline",
+        "set_pointer_accuracy",
+        "increment_accuracy",
+        "joint_accuracy",
+        "edge_accuracy",
     )
     batch = {name: torch.tensor(values) for name in names}
     batch["observed_ties"] = torch.zeros(len(values), dtype=torch.long)
     batch["corrective_ties"] = torch.zeros(len(values), dtype=torch.long)
     batch["node_count"] = torch.tensor(node_counts)
+    batch["edge_count"] = torch.tensor(edge_counts or node_counts)
     batch["corruption"] = corruption
     return batch
 
@@ -50,10 +49,10 @@ def test_summary_reports_image_mean_and_pooled_over_unequal_batches() -> None:
 
     summary = summarize_image_metrics(per_image)
 
-    assert summary["all/corrective_parent_accuracy/image_mean"] == pytest.approx(0.75)
-    assert summary["all/corrective_parent_accuracy/pooled"] == pytest.approx(0.8)
-    assert summary["clean/corrective_parent_accuracy/image_mean"] == pytest.approx(0.5)
-    assert summary["noisy/corrective_parent_accuracy/pooled"] == pytest.approx(1.0)
+    assert summary["all/set_pointer_accuracy/image_mean"] == pytest.approx(0.75)
+    assert summary["all/set_pointer_accuracy/pooled"] == pytest.approx(0.8)
+    assert summary["clean/set_pointer_accuracy/image_mean"] == pytest.approx(0.5)
+    assert summary["noisy/set_pointer_accuracy/pooled"] == pytest.approx(1.0)
     assert (summary["all/images"], summary["all/nodes"]) == (2, 5)
 
 
@@ -64,7 +63,7 @@ def test_clean_only_summary_has_no_noisy_group() -> None:
 
     summary = summarize_image_metrics(per_image)
 
-    assert "clean/action_accuracy/image_mean" in summary
+    assert "clean/increment_accuracy/image_mean" in summary
     assert {name.split("/")[0] for name in summary} == {"all", "clean"}
 
 
@@ -83,7 +82,7 @@ def test_summary_reports_each_noise_kind_and_pools_them_as_noisy() -> None:
 
     summary = summarize_image_metrics(per_image)
 
-    accuracy = "corrective_parent_accuracy"
+    accuracy = "set_pointer_accuracy"
     assert summary[f"salt_and_pepper/{accuracy}/image_mean"] == pytest.approx(0.5)
     assert summary[f"salt_and_pepper/{accuracy}/pooled"] == pytest.approx(0.8)
     assert (summary["salt_and_pepper/images"], summary["salt_and_pepper/nodes"]) == (
@@ -106,54 +105,69 @@ def test_summary_reports_each_noise_kind_and_pools_them_as_noisy() -> None:
     }
 
 
-def test_joint_accuracy_needs_parent_and_action_right_on_the_same_node() -> None:
-    # Node 0 has both right, node 1 only its parent, node 2 only its action
-    hidden = torch.eye(3)
-    step = SimpleNamespace(query=hidden, key=hidden)
+def _worked_example(query, key, increment_logits, contraction_logits):
+    # The worked example of the zone plan, five nodes on a path whose parent
+    # zone is A, made of nodes 0 and 1
+    step = SimpleNamespace(query=query, key=key)
     output = SimpleNamespace(
         observed=[step],
         corrective=[step],
-        actions=[torch.tensor([[1.0, 0, 0], [1.0, 0, 0], [0, 1.0, 0]])],
+        increment=[torch.tensor(increment_logits)],
+        contraction=[torch.tensor(contraction_logits)],
     )
     data = SimpleNamespace(
         num_graphs=1,
-        ptr=torch.tensor([0, 3]),
-        batch=torch.zeros(3, dtype=torch.long),
-        observed_parents=torch.tensor([0, 1, 2]),
-        corrective_parents=torch.tensor([0, 1, 0]),
-        correction_actions=torch.tensor([0, 2, 1]),
+        ptr=torch.tensor([0, 5]),
+        batch=torch.zeros(5, dtype=torch.long),
+        observed_parents=torch.zeros(5, dtype=torch.long),
+        zone=torch.tensor([0, 0, 2, 2, 4]),
+        parent_zone=torch.zeros(5, dtype=torch.long),
+        increment=torch.tensor([0, 0, 1, 1, 0]),
+        rag_edge_index=torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]]),
+    )
+    return batch_image_metrics(output, data)
+
+
+def test_pointer_is_right_anywhere_in_the_parent_zone_and_joint_needs_both() -> None:
+    # Nodes 0, 1 and 2 point at node 1, node 3 at node 0 and node 4 at node 2.
+    # Increments are right on nodes 0, 1, 3 and 4
+    key = torch.eye(5)
+    query = key[[1, 1, 1, 0, 2]]
+    metrics = _worked_example(
+        query, key, [-1.0, -1.0, -1.0, 1.0, -1.0], [1.0, -1.0, 1.0, -1.0]
     )
 
-    metrics = batch_image_metrics(output, data)
+    assert metrics["set_pointer_accuracy"].item() == pytest.approx(4 / 5)
+    assert metrics["increment_accuracy"].item() == pytest.approx(4 / 5)
+    # Node 2 has its increment wrong and node 4 its pointer
+    assert metrics["joint_accuracy"].item() == pytest.approx(3 / 5)
+    assert metrics["edge_accuracy"].item() == pytest.approx(1.0)
 
-    assert metrics["corrective_parent_accuracy"].item() == pytest.approx(2 / 3)
-    assert metrics["action_accuracy"].item() == pytest.approx(2 / 3)
-    assert metrics["joint_correction_accuracy"].item() == pytest.approx(1 / 3)
+
+def test_edge_accuracy_reads_the_sign_against_same_zone_targets() -> None:
+    query, key = torch.ones(5, 1), torch.ones(5, 1)
+    # The plan's false contraction of edge (3, 4)
+    metrics = _worked_example(query, key, [0.0] * 5, [1.0, -1.0, 1.0, 2.0])
+
+    assert metrics["edge_accuracy"].item() == pytest.approx(3 / 4)
+    assert metrics["edge_count"].tolist() == [4]
+    assert metrics["node_count"].tolist() == [5]
 
 
-def test_baselines_on_a_clean_observation() -> None:
-    # A clean observation keeps every node, so corrective parents equal observed ones
-    parents = torch.tensor([0, 0, 1])
-    actions = torch.full((3,), int(CorrectionAction.KEEP_ONE))
-    actions[0] = int(CorrectionAction.KEEP_ZERO)
-    hidden = torch.eye(3)
-    step = SimpleNamespace(query=hidden, key=hidden)
-    output = SimpleNamespace(
-        observed=[step],
-        corrective=[step],
-        actions=[torch.zeros(3, 3)],
-    )
-    data = SimpleNamespace(
-        num_graphs=1,
-        ptr=torch.tensor([0, 3]),
-        batch=torch.zeros(3, dtype=torch.long),
-        observed_parents=parents,
-        corrective_parents=parents,
-        correction_actions=actions,
-    )
+def test_edge_accuracy_is_pooled_by_edges_and_skips_images_without_edges() -> None:
+    # Image A has 2 nodes, 1 edge and edge accuracy 1. Image B has 4 nodes,
+    # 3 edges and accuracy 0. Image C has 1 node and no edge
+    per_image = {
+        name: [value]
+        for name, value in _metric_batch(
+            [1.0, 0.0, 0.0], [2, 4, 1], ["clean"] * 3, edge_counts=[1, 3, 0]
+        ).items()
+    }
 
-    metrics = batch_image_metrics(output, data)
+    summary = summarize_image_metrics(per_image)
 
-    assert metrics["copy_observed_baseline"].tolist() == [1.0]
-    assert metrics["always_merge_baseline"].tolist() == [0.0]
-    assert metrics["node_count"].tolist() == [3]
+    assert summary["all/edge_accuracy/image_mean"] == pytest.approx(0.5)
+    assert summary["all/edge_accuracy/pooled"] == pytest.approx(1 / 4)
+    assert summary["all/joint_accuracy/image_mean"] == pytest.approx(1 / 3)
+    assert summary["all/joint_accuracy/pooled"] == pytest.approx(2 / 7)
+    assert (summary["all/nodes"], summary["all/edges"]) == (7, 4)

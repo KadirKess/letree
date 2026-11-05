@@ -1,1 +1,1 @@
-"""Hard decoding of corrective pointers and merge/depth actions."""
+"""Hard decoding of contracted groups into a hierarchical structure."""

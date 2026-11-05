@@ -33,8 +33,10 @@ def test_an_invalid_model_decode_still_draws():
     labels = np.array([[0, 1], [1, 1]])
     depth = np.array([[0, 1], [1, 1]])
     decoded = {
-        "failure": None,
-        "groups": labels,
+        "failure": "",
+        "groups": 2,
+        "root_claims": 1,
+        "group_map": labels,
         "depth": depth,
         "misassigned": np.zeros((2, 2), dtype=bool),
         "depth_difference": np.zeros((2, 2), dtype=np.int64),
@@ -49,6 +51,7 @@ def test_an_invalid_model_decode_still_draws():
         "observed_labels": labels,
         "observed": decoded,
         "oracle": decoded,
-        "model": {"failure": "root_count"},
+        "model_soft": decoded,
+        "model_hard": {"failure": "root_count", "groups": 2, "root_claims": 2},
     }
     plt.close(sample_figure(sample))

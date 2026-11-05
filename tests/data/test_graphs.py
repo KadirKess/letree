@@ -92,6 +92,8 @@ def test_exact_features_use_observed_non_square_image_area() -> None:
 
     adapted = _graph(_sample(tree_image))
 
+    # Each RAG edge appears once for contraction, with no self loop.
+    torch.testing.assert_close(adapted.rag_edge_index, torch.tensor([[0, 1], [1, 2]]))
     assert adapted.x.dtype == torch.float32
     torch.testing.assert_close(
         adapted.x,
@@ -113,10 +115,10 @@ def test_one_pixel_features_and_targets_are_finite_for_both_tree_kinds(kind) -> 
     assert torch.isfinite(adapted.x).all()
     torch.testing.assert_close(adapted.edge_index, torch.tensor([[0], [0]]))
     torch.testing.assert_close(adapted.observed_parents, torch.tensor([0]))
-    torch.testing.assert_close(
-        adapted.correction_actions,
-        torch.tensor([1]),
-    )
+    assert adapted.rag_edge_index.shape == (2, 0)
+    torch.testing.assert_close(adapted.zone, torch.tensor([0]))
+    torch.testing.assert_close(adapted.parent_zone, torch.tensor([0]))
+    torch.testing.assert_close(adapted.increment, torch.tensor([0]))
 
 
 def test_corrupted_sample_selects_only_observed_graph_and_parent_targets() -> None:
@@ -130,7 +132,10 @@ def test_corrupted_sample_selects_only_observed_graph_and_parent_targets() -> No
     assert adapted.x.shape == (1, 3)
     torch.testing.assert_close(adapted.x[:, 0], torch.tensor([30 / 255]))
     torch.testing.assert_close(adapted.observed_parents, torch.tensor([0]))
-    torch.testing.assert_close(adapted.correction_actions, torch.tensor([1]))
+    # The overlap tie goes to the first clean anchor.
+    torch.testing.assert_close(adapted.zone, torch.tensor([0]))
+    torch.testing.assert_close(adapted.parent_zone, torch.tensor([0]))
+    torch.testing.assert_close(adapted.increment, torch.tensor([0]))
     assert not hasattr(adapted, "image")
     assert not hasattr(adapted, "label_map")
     assert not hasattr(adapted, "overlap_purity")
@@ -193,6 +198,9 @@ def test_pyg_loader_offsets_edges_but_not_parent_targets() -> None:
     torch.testing.assert_close(packed.ptr, torch.tensor([0, 3, 4]))
     torch.testing.assert_close(packed.batch, torch.tensor([0, 0, 0, 1]))
     torch.testing.assert_close(packed.observed_parents, torch.tensor([0, 0, 0, 0]))
+    torch.testing.assert_close(packed.zone, torch.tensor([0, 1, 2, 0]))
+    torch.testing.assert_close(packed.parent_zone, torch.tensor([0, 0, 0, 0]))
+    torch.testing.assert_close(packed.increment, torch.tensor([0, 1, 0, 0]))
     assert tuple(packed.edge_index[:, -1].tolist()) == (3, 3)
     assert not torch.any((packed.edge_index[0] < 3) & (packed.edge_index[1] >= 3))
     assert not torch.any((packed.edge_index[0] >= 3) & (packed.edge_index[1] < 3))
@@ -202,12 +210,8 @@ def test_pyg_loader_offsets_edges_but_not_parent_targets() -> None:
         torch.testing.assert_close(actual.x, expected.x)
         torch.testing.assert_close(actual.edge_index, expected.edge_index)
         torch.testing.assert_close(actual.observed_parents, expected.observed_parents)
-        torch.testing.assert_close(
-            actual.corrective_parents, expected.corrective_parents
-        )
-        torch.testing.assert_close(
-            actual.correction_actions, expected.correction_actions
-        )
+        for key in ("rag_edge_index", "zone", "parent_zone", "increment"):
+            torch.testing.assert_close(getattr(actual, key), getattr(expected, key))
 
 
 def test_pyg_loader_preserves_nonzero_local_parents_in_later_graphs() -> None:
@@ -224,21 +228,38 @@ def test_pyg_loader_preserves_nonzero_local_parents_in_later_graphs() -> None:
 
     torch.testing.assert_close(packed.ptr, torch.tensor([0, 1, 3]))
     torch.testing.assert_close(packed.observed_parents, torch.tensor([0, 1, 1]))
-    torch.testing.assert_close(packed.corrective_parents, torch.tensor([0, 1, 1]))
+    torch.testing.assert_close(packed.zone, torch.tensor([0, 0, 1]))
+    torch.testing.assert_close(packed.parent_zone, torch.tensor([0, 1, 1]))
+    # RAG edges are node ids, so the second graph's edge moves past the first node.
+    torch.testing.assert_close(packed.rag_edge_index, torch.tensor([[1], [2]]))
     assert torch.any(packed.edge_index == 2)
 
 
 @pytest.mark.parametrize(
-    ("kind", "observed_image", "observed_parents", "corrective_parents", "actions"),
+    ("kind", "observed_image", "observed_parents", "zone", "parent_zone", "increment"),
     [
-        (ComponentTreeKind.MAX_TREE, [[11, 12, 20]], [0, 0, 1], [0, 0, 0], [1, 0, 2]),
-        (ComponentTreeKind.MIN_TREE, [[11, 12, 20]], [1, 2, 2], [2, 0, 2], [2, 0, 1]),
-        (ComponentTreeKind.MAX_TREE, [[25, 25, 35]], [0, 0], [0, 0], [1, 2]),
-        (ComponentTreeKind.MIN_TREE, [[25, 25, 35]], [1, 1], [1, 1], [2, 1]),
+        (
+            ComponentTreeKind.MAX_TREE,
+            [[11, 12, 20]],
+            [0, 0, 1],
+            [0, 0, 1],
+            [0, 0, 0],
+            [0, 0, 1],
+        ),
+        (
+            ComponentTreeKind.MIN_TREE,
+            [[11, 12, 20]],
+            [1, 2, 2],
+            [0, 0, 1],
+            [1, 1, 1],
+            [1, 1, 0],
+        ),
+        (ComponentTreeKind.MAX_TREE, [[25, 25, 35]], [0, 0], [0, 2], [0, 0], [0, 1]),
+        (ComponentTreeKind.MIN_TREE, [[25, 25, 35]], [1, 1], [0, 2], [2, 2], [1, 0]),
     ],
 )
-def test_refining_and_mixed_observations_have_three_exact_targets(
-    kind, observed_image, observed_parents, corrective_parents, actions
+def test_refining_and_mixed_observations_have_exact_targets(
+    kind, observed_image, observed_parents, zone, parent_zone, increment
 ):
     refining = len(observed_parents) == 3
     clean_image = [[10, 10, 20]] if refining else [[10, 20, 30]]
@@ -246,10 +267,9 @@ def test_refining_and_mixed_observations_have_three_exact_targets(
     observed = _reference_sample(np.asarray(observed_image, dtype=np.uint8), kind).clean
     adapted = _graph(_sample(clean, observed))
     torch.testing.assert_close(adapted.observed_parents, torch.tensor(observed_parents))
-    torch.testing.assert_close(
-        adapted.corrective_parents, torch.tensor(corrective_parents)
-    )
-    torch.testing.assert_close(adapted.correction_actions, torch.tensor(actions))
+    torch.testing.assert_close(adapted.zone, torch.tensor(zone))
+    torch.testing.assert_close(adapted.parent_zone, torch.tensor(parent_zone))
+    torch.testing.assert_close(adapted.increment, torch.tensor(increment))
     expected_levels = [11, 12, 20] if refining else [25, 35]
     torch.testing.assert_close(adapted.x[:, 0], torch.tensor(expected_levels) / 255)
 
@@ -287,16 +307,23 @@ def test_adapter_preserves_targets_under_independent_node_relabeling(kind):
     )
     order = torch.as_tensor(observed_permutation)
     torch.testing.assert_close(reordered.x[order], original.x)
+    torch.testing.assert_close(reordered.increment[order], original.increment)
     torch.testing.assert_close(
-        reordered.correction_actions[order], original.correction_actions
+        reordered.observed_parents[order], order[original.observed_parents]
     )
-    for key in ("observed_parents", "corrective_parents"):
-        original_parents = getattr(original, key)
-        reordered_parents = getattr(reordered, key)
-        torch.testing.assert_close(reordered_parents[order], order[original_parents])
+    # Zones are clean ids, so they follow the clean relabelling.
+    clean_order = torch.as_tensor(clean_permutation)
+    for key in ("zone", "parent_zone"):
+        torch.testing.assert_close(
+            getattr(reordered, key)[order], clean_order[getattr(original, key)]
+        )
     remapped_edges = order[original.edge_index]
     assert sorted(map(tuple, reordered.edge_index.T.tolist())) == sorted(
         map(tuple, remapped_edges.T.tolist())
+    )
+    remapped_rag = order[original.rag_edge_index]
+    assert sorted(map(sorted, reordered.rag_edge_index.T.tolist())) == sorted(
+        map(sorted, remapped_rag.T.tolist())
     )
 
 

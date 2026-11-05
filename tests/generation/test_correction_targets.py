@@ -11,19 +11,32 @@ from letree.component_tree.types import ComponentTree, ComponentTreeKind, FlatZo
 from letree.generation import derive_correction_targets
 
 
+def _targets_for(clean, observed, kind):
+    clean_image = np.array(clean, dtype=np.uint8)
+    observed_image = np.array(observed, dtype=np.uint8)
+    if kind == ComponentTreeKind.MIN_TREE:
+        clean_image = 255 - clean_image
+        observed_image = 255 - observed_image
+
+    clean_graph = build_reference_rag(clean_image)
+    clean_tree = build_reference_component_tree(clean_graph, kind)
+    observed_graph = build_reference_rag(observed_image)
+    return derive_correction_targets(clean_graph, clean_tree, observed_graph)
+
+
 @pytest.mark.parametrize("kind", list(ComponentTreeKind))
 @pytest.mark.parametrize(
-    "clean, observed, parents, actions",
+    "clean, observed, zone, parent_zone, increment",
     [
-        ([10], [10], [0], [1]),
-        ([10, 20, 10], [10, 20, 10], [0, 0, 0], [1, 2, 1]),
-        ([30, 20, 10], [30, 20, 10], [1, 2, 2], [2, 2, 1]),
-        ([20, 20, 20], [10, 30, 10], [0, 0, 0], [1, 0, 0]),
-        ([10, 10, 20], [1, 2, 3], [0, 0, 0], [1, 0, 2]),
-        ([10, 20, 30], [30, 20, 10], [0, 0, 1], [1, 2, 2]),
-        ([10, 20, 30], [7, 7, 8], [0, 0], [1, 2]),
-        ([20, 10, 30], [7, 7, 8], [0, 0], [1, 1]),
-        ([10, 20, 20], [7, 7, 7], [0], [1]),
+        ([10], [10], [0], [0], [0]),
+        ([10, 20, 10], [10, 20, 10], [0, 1, 2], [0, 0, 0], [0, 1, 0]),
+        ([30, 20, 10], [30, 20, 10], [0, 1, 2], [1, 2, 2], [1, 1, 0]),
+        ([20, 20, 20], [10, 30, 10], [0, 0, 0], [0, 0, 0], [0, 0, 0]),
+        ([10, 10, 20], [1, 2, 3], [0, 0, 1], [0, 0, 0], [0, 0, 1]),
+        ([10, 20, 30], [30, 20, 10], [0, 1, 2], [0, 0, 1], [0, 1, 1]),
+        ([10, 20, 30], [7, 7, 8], [0, 2], [0, 0], [0, 1]),
+        ([20, 10, 30], [7, 7, 8], [0, 2], [0, 0], [0, 0]),
+        ([10, 20, 20], [7, 7, 7], [1], [1], [0]),
     ],
     ids=[
         "one-pixel",
@@ -37,23 +50,71 @@ from letree.generation import derive_correction_targets
         "only-nonroot-role-survives",
     ],
 )
-def test_named_correction_targets(kind, clean, observed, parents, actions):
-    clean_image = np.array([clean], dtype=np.uint8)
-    observed_image = np.array([observed], dtype=np.uint8)
-    if kind == ComponentTreeKind.MIN_TREE:
-        clean_image = 255 - clean_image
-        observed_image = 255 - observed_image
+def test_named_correction_targets(kind, clean, observed, zone, parent_zone, increment):
+    targets, _ = _targets_for([clean], [observed], kind)
 
-    clean_graph = build_reference_rag(clean_image)
-    clean_tree = build_reference_component_tree(clean_graph, kind)
-    observed_graph = build_reference_rag(observed_image)
+    np.testing.assert_array_equal(targets.zone, zone)
+    np.testing.assert_array_equal(targets.parent_zone, parent_zone)
+    np.testing.assert_array_equal(targets.increment, increment)
+    assert targets.zone.dtype == np.int64
+    assert targets.parent_zone.dtype == np.int64
+    assert targets.increment.dtype == np.int64
 
-    targets, _ = derive_correction_targets(clean_graph, clean_tree, observed_graph)
 
-    np.testing.assert_array_equal(targets.corrective_parents, parents)
-    np.testing.assert_array_equal(targets.actions, actions)
-    assert targets.corrective_parents.dtype == np.int64
-    assert targets.actions.dtype == np.int64
+@pytest.mark.parametrize("kind", list(ComponentTreeKind))
+def test_plan_worked_example(kind):
+    # Clean zones A, B and C have ids 0, 1 and 2. A and C share the root component.
+    targets, diagnostics = _targets_for(
+        [[0, 0, 5, 5, 0, 0]], [[0, 1, 5, 4, 0, 0]], kind
+    )
+
+    np.testing.assert_array_equal(targets.zone, [0, 0, 1, 1, 2])
+    np.testing.assert_array_equal(targets.parent_zone, [0, 0, 0, 0, 0])
+    np.testing.assert_array_equal(targets.increment, [0, 0, 1, 1, 0])
+    assert diagnostics.artificial_root_attachment_count == 0
+
+
+@pytest.mark.parametrize("kind", list(ComponentTreeKind))
+def test_lost_root_keeps_extreme_forest_root(kind):
+    # Clean zones are 0 at level 0, 1 at 3, 2 at 0 and 3 at 5. Zones 0 and 2 are lost.
+    clean = [[0, 3, 3, 3, 0, 5, 5, 5]]
+    observed = [[3, 3, 3, 3, 5, 5, 5, 5]]
+    targets, diagnostics = _targets_for(clean, observed, kind)
+
+    # The level 3 zone is closer to the lost root. The other root adds no depth.
+    np.testing.assert_array_equal(targets.zone, [1, 3])
+    np.testing.assert_array_equal(targets.parent_zone, [1, 1])
+    np.testing.assert_array_equal(targets.increment, [0, 0])
+    assert diagnostics.clean_root_missing is True
+    assert diagnostics.artificial_root_attachment_count == 1
+
+
+@pytest.mark.parametrize("kind", list(ComponentTreeKind))
+def test_lost_root_prefers_larger_forest_root(kind):
+    # Clean zones 1 and 3 share level 5, with 2 and 3 pixels. Zones 0 and 2 are lost.
+    clean = [[0, 5, 5, 0, 5, 5, 5]]
+    observed = [[6, 6, 6, 7, 7, 7, 7]]
+    targets, diagnostics = _targets_for(clean, observed, kind)
+
+    # Size decides before the anchor, so the later and larger zone 3 is the root.
+    np.testing.assert_array_equal(targets.zone, [1, 3])
+    np.testing.assert_array_equal(targets.parent_zone, [3, 3])
+    np.testing.assert_array_equal(targets.increment, [0, 0])
+    assert diagnostics.clean_root_missing is True
+    assert diagnostics.artificial_root_attachment_count == 1
+
+
+@pytest.mark.parametrize("kind", list(ComponentTreeKind))
+def test_split_zone_shares_targets(kind):
+    # Clean zone 0 is the top row at 20 and zone 1 the rest at 10.
+    clean = [[20, 20, 20], [10, 10, 10], [10, 10, 10]]
+    # The level 5 zone cuts the top row, so its two ends are not adjacent.
+    observed = [[21, 5, 22], [5, 5, 5], [5, 5, 5]]
+    targets, _ = _targets_for(clean, observed, kind)
+
+    np.testing.assert_array_equal(targets.zone, [0, 1, 0])
+    np.testing.assert_array_equal(targets.parent_zone, [1, 1, 1])
+    np.testing.assert_array_equal(targets.increment, [1, 0, 1])
 
 
 def _permute_graph(graph, permutation):
@@ -94,12 +155,15 @@ def test_overlap_and_root_ties_follow_anchors(kind, permute_clean, permute_obser
         clean_graph, clean_tree, observed_graph
     )
 
-    # The overlap tie loses the clean root. The root tie keeps the first anchor.
+    # The overlap tie loses the clean root. The forest roots tie on level and size,
+    # so the first clean anchor wins.
     np.testing.assert_array_equal(
-        targets.corrective_parents[observed_permutation],
-        [observed_permutation[0], observed_permutation[0]],
+        targets.zone[observed_permutation], clean_permutation[[0, 2]]
     )
-    np.testing.assert_array_equal(targets.actions[observed_permutation], [1, 1])
+    np.testing.assert_array_equal(
+        targets.parent_zone[observed_permutation], clean_permutation[[0, 0]]
+    )
+    np.testing.assert_array_equal(targets.increment[observed_permutation], [0, 0])
     np.testing.assert_array_equal(
         diagnostics.overlap_clean_zone_count[observed_permutation], [2, 1]
     )
@@ -223,8 +287,9 @@ def test_long_missing_ancestor_chain(kind):
     targets, _ = derive_correction_targets(clean_graph, clean_tree, observed_graph)
 
     # The first zone selects role zero. Roles 254 and 255 keep one increment each.
-    np.testing.assert_array_equal(targets.corrective_parents, [0, 0, 1])
-    np.testing.assert_array_equal(targets.actions, [1, 2, 2])
+    np.testing.assert_array_equal(targets.zone, [0, 254, 255])
+    np.testing.assert_array_equal(targets.parent_zone, [0, 0, 254])
+    np.testing.assert_array_equal(targets.increment, [0, 1, 1])
 
 
 @pytest.mark.parametrize("kind", list(ComponentTreeKind))
@@ -245,6 +310,7 @@ def test_checkerboard_identity_at_full_image_scale(kind):
     # Sparse construction fits comfortably here. A Cartesian matrix needs gigabytes.
     assert peak_bytes < 64 * 1024**2
 
-    np.testing.assert_array_equal(targets.corrective_parents, tree.parents)
-    expected_actions = np.where(graph.levels == graph.levels[tree.parents], 1, 2)
-    np.testing.assert_array_equal(targets.actions, expected_actions)
+    np.testing.assert_array_equal(targets.zone, np.arange(graph.levels.size))
+    np.testing.assert_array_equal(targets.parent_zone, tree.parents)
+    expected_increment = graph.levels != graph.levels[tree.parents]
+    np.testing.assert_array_equal(targets.increment, expected_increment)

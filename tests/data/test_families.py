@@ -209,14 +209,15 @@ def test_loading_and_adaptation_do_not_rederive_targets(tmp_path, monkeypatch):
     monkeypatch.setattr(target_module, "derive_correction_targets", forbidden)
     for observation in load_family(path):
         graph = to_graph(observation.tree_image, observation.targets)
-        np.testing.assert_array_equal(
-            graph.corrective_parents.numpy(), observation.targets.corrective_parents
-        )
+        for name in ("zone", "parent_zone", "increment"):
+            np.testing.assert_array_equal(
+                getattr(graph, name).numpy(), getattr(observation.targets, name)
+            )
 
 
 def test_diagnostics_keep_their_clean_and_observed_scopes(tmp_path):
-    # The observed image merges the first two clean zones, so one of them has no
-    # observed representative
+    # The observed image merges the first two clean zones, so no observed zone
+    # selects the second one
     kind = ComponentTreeKind.MAX_TREE
     clean = build_generation_sample(np.array([[10, 20, 30]], dtype=np.uint8), kind)
     observed = build_generation_sample(np.array([[25, 25, 35]], dtype=np.uint8), kind)
@@ -236,8 +237,9 @@ def test_diagnostics_keep_their_clean_and_observed_scopes(tmp_path):
     save_family(tmp_path / "family.npz", family, "square.png")
 
     loaded = load_family(tmp_path / "family.npz")[1]
-    np.testing.assert_array_equal(loaded.targets.corrective_parents, [0, 0])
-    np.testing.assert_array_equal(loaded.targets.actions, [1, 2])
+    np.testing.assert_array_equal(loaded.targets.zone, [0, 2])
+    np.testing.assert_array_equal(loaded.targets.parent_zone, [0, 0])
+    np.testing.assert_array_equal(loaded.targets.increment, [0, 1])
     np.testing.assert_array_equal(
         loaded.diagnostics.missing_clean_zones, [False, True, False]
     )
@@ -258,24 +260,57 @@ def test_a_repeated_realization_within_one_kind_is_rejected(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("parents", "actions", "message"),
+    ("zone", "parent_zone", "increment", "message"),
     [
-        ([0, 0, 3], [1, 0, 0], "local observed node"),
-        ([0, 1, 0], [1, 1, 0], "one self-parented"),
-        ([0, 0, 0], [0, 0, 0], "KEEP_ZERO root"),
-        ([0, 2, 1], [1, 0, 0], "cycle"),
+        ([0, 0, 10**6], [0, 0, 0], [0, 0, 1], "clean zone identifiers"),
+        ([0, 0, 1], [0, 0, -1], [0, 0, 1], "clean zone identifiers"),
+        ([0, 0, 1], [0, 0, 0], [0, 2, 1], "0 or 1"),
+        ([0, 0, 1], [0, 1, 0], [0, 0, 1], "share parent zone"),
+        ([0, 0, 1], [0, 0, 0], [0, 1, 1], "share parent zone"),
+        ([0, 1], [0, 2], [0, 1], "zones of observed nodes"),
+        ([0, 1], [0, 1], [0, 0], "Exactly one zone"),
+        ([0, 1], [0, 0], [1, 1], "Exactly one zone"),
+        ([0, 1, 2], [0, 2, 1], [0, 0, 0], "cycle"),
     ],
-    ids=["out_of_range", "two_roots", "merging_root", "cycle"],
+    ids=[
+        "zone_out_of_range",
+        "parent_out_of_range",
+        "increment_not_binary",
+        "zone_disagrees_on_parent",
+        "zone_disagrees_on_increment",
+        "parent_zone_not_observed",
+        "two_roots",
+        "root_with_increment",
+        "cycle",
+    ],
 )
-def test_invalid_targets_are_rejected_before_writing(parents, actions, message):
+def test_invalid_targets_are_rejected_before_writing(
+    zone, parent_zone, increment, message
+):
     family = _family()
     family[1] = replace(
         family[1],
-        targets=CorrectionTargets(np.array(parents), np.array(actions)),
+        targets=CorrectionTargets(
+            np.array(zone), np.array(parent_zone), np.array(increment)
+        ),
     )
 
     with pytest.raises(ValueError, match=message):
         check_family(family)
+
+
+def test_zones_need_not_be_consecutive():
+    # Clean zones nobody selects leave gaps, and the tree skips them.
+    family = _family()
+    assert family[0].tree_image.graph.levels.size == 3
+    family[1] = replace(
+        family[1],
+        targets=CorrectionTargets(
+            np.array([2, 0, 2]), np.array([0, 0, 0]), np.array([1, 0, 1])
+        ),
+    )
+
+    check_family(family)
 
 
 @pytest.mark.parametrize("workers", [1, 2])
@@ -307,7 +342,7 @@ def test_manifest_records_the_dataset_and_its_source(tmp_path):
     manifest = json.loads((root / "manifest.json").read_text())
     assert manifest["base_seed"] == 3
     assert manifest["component_tree_kind"] == "min_tree"
-    assert manifest["correction_target_policy"] == "pixel_count_representative_v1"
+    assert manifest["correction_target_policy"] == "zone_parent_increment_v1"
     assert manifest["noise_configs"]["additive_gaussian"]["standard_deviation"] == 10.0
     assert list(manifest["noise_configs"]) == [
         "salt_and_pepper",

@@ -10,7 +10,6 @@ from letree.component_tree.reference import (
 from letree.component_tree.types import ComponentTree, ComponentTreeKind, FlatZoneGraph
 from letree.generation import derive_correction_targets
 from letree.generation.samples import _build_production_tree
-from letree.generation.targets import CorrectionAction
 
 
 def _checked_graph(image, kind):
@@ -57,71 +56,82 @@ def _threshold_depth(image, kind):
     return depths.reshape(image.shape)
 
 
-def _inspect_targets(graph, targets):
-    parents = targets.corrective_parents
-    actions = targets.actions
-    node_count = graph.levels.size
-    assert parents.shape == actions.shape == (node_count,)
-    assert np.all((parents >= 0) & (parents < node_count))
-    assert set(actions) <= set(CorrectionAction)
-    roots = [node for node in range(node_count) if parents[node] == node]
-    assert len(roots) == 1
-    assert actions[roots[0]] == CorrectionAction.KEEP_ZERO
+def _inspect_targets(clean_graph, observed_graph, targets):
+    zone, parent_zone, increment = targets.zone, targets.parent_zone, targets.increment
+    node_count = observed_graph.levels.size
+    assert zone.shape == parent_zone.shape == increment.shape == (node_count,)
+    assert set(increment) <= {0, 1}
+    represented = set(zone.tolist())
+    assert set(parent_zone.tolist()) <= represented
 
-    terminals = np.empty(node_count, dtype=np.int64)
-    node_depths = np.zeros(node_count, dtype=np.int64)
+    # Every node of a zone carries the same parent zone and increment.
+    zone_parent = {}
+    zone_increment = {}
     for node in range(node_count):
-        current = node
+        assert (
+            zone_parent.setdefault(zone[node], parent_zone[node]) == parent_zone[node]
+        )
+        assert zone_increment.setdefault(zone[node], increment[node]) == increment[node]
+
+    # One zone is its own parent zone and every zone reaches it without a cycle.
+    roots = [z for z in represented if zone_parent[z] == z]
+    assert len(roots) == 1
+    assert zone_increment[roots[0]] == 0
+    zone_depth = {}
+    for start in represented:
+        current = start
         visited = set()
-        while parents[current] != current:
+        depth = 0
+        while zone_parent[current] != current:
             assert current not in visited
             visited.add(current)
-            node_depths[node] += actions[current] == CorrectionAction.KEEP_ONE
-            current = int(parents[current])
+            depth += zone_increment[current]
+            current = zone_parent[current]
         assert current == roots[0]
+        zone_depth[start] = depth
 
-        current = node
-        while actions[current] == CorrectionAction.MERGE:
-            current = int(parents[current])
-        terminals[node] = current
+    # Equal levels never add depth, whatever the link.
+    levels = clean_graph.levels
+    for z in represented:
+        if levels[z] == levels[zone_parent[z]]:
+            assert zone_increment[z] == 0
 
-    return terminals, node_depths[graph.label_map]
+    node_depth = np.array([zone_depth[z] for z in zone.tolist()], dtype=np.int64)
+    return zone_parent, zone_increment, node_depth[observed_graph.label_map]
+
+
+def _contraction_groups(observed_graph, zone):
+    groups = list(range(zone.size))
+
+    def find(node):
+        while groups[node] != node:
+            node = groups[node]
+        return node
+
+    for left, right in observed_graph.edge_index:
+        if zone[left] == zone[right]:
+            groups[find(int(left))] = find(int(right))
+    return np.array([find(node) for node in range(zone.size)])
 
 
 def _assert_exact_recovery(clean, clean_graph, clean_tree, observed_graph, targets):
-    terminals, pixel_depth = _inspect_targets(observed_graph, targets)
-    clean_groups = {
-        frozenset(np.flatnonzero(clean_graph.label_map.ravel() == zone)): zone
-        for zone in range(clean_graph.levels.size)
-    }
-    group_labels = terminals[observed_graph.label_map]
-    group_roles = {}
-    for representative in np.unique(terminals):
-        members = frozenset(np.flatnonzero(group_labels.ravel() == representative))
-        assert members in clean_groups
-        group_roles[int(representative)] = clean_groups[members]
-        observed_members = np.flatnonzero(terminals == representative)
-        assert observed_graph.anchors[representative] == min(
-            observed_graph.anchors[observed_members]
-        )
-    assert set(group_roles.values()) == set(range(clean_graph.levels.size))
+    zone_parent, zone_increment, pixel_depth = _inspect_targets(
+        clean_graph, observed_graph, targets
+    )
+    zone = targets.zone
 
-    for representative, clean_zone in group_roles.items():
-        parent_group = terminals[targets.corrective_parents[representative]]
-        assert group_roles[int(parent_group)] == clean_tree.parents[clean_zone]
-        clean_parent = clean_tree.parents[clean_zone]
+    # Every clean zone survives, and the zone links are the clean node parents.
+    assert set(zone_parent) == set(range(clean_graph.levels.size))
+    for clean_zone, clean_parent in enumerate(clean_tree.parents):
+        assert zone_parent[clean_zone] == clean_parent
         increment = clean_graph.levels[clean_zone] != clean_graph.levels[clean_parent]
-        assert (
-            targets.actions[representative] == CorrectionAction.KEEP_ONE
-        ) == increment
+        assert zone_increment[clean_zone] == increment
 
-    contracted_edges = set()
-    for left, right in observed_graph.edge_index:
-        first = group_roles[int(terminals[left])]
-        second = group_roles[int(terminals[right])]
-        if first != second:
-            contracted_edges.add(tuple(sorted((first, second))))
-    assert contracted_edges == {tuple(sorted(edge)) for edge in clean_graph.edge_index}
+    # Contracting edges inside a zone recovers each clean zone as one group.
+    groups = _contraction_groups(observed_graph, zone)
+    for clean_zone in range(clean_graph.levels.size):
+        assert np.unique(groups[zone == clean_zone]).size == 1
+    np.testing.assert_array_equal(zone[observed_graph.label_map], clean_graph.label_map)
     np.testing.assert_array_equal(pixel_depth, _threshold_depth(clean, clean_tree.kind))
 
 
@@ -158,7 +168,7 @@ def test_exhaustive_binary_clean_ternary_observed_recovery(kind):
                 assert diagnostics.artificial_root_attachment_count == 0
                 refining_count += 1
             else:
-                _inspect_targets(observed_graph, targets)
+                _inspect_targets(clean_graph, observed_graph, targets)
                 mixed_count += 1
 
     assert refining_count == 630
@@ -199,42 +209,47 @@ def test_random_refining_recovery_with_permuted_ids(kind):
 
 @pytest.mark.parametrize("kind", list(ComponentTreeKind))
 @pytest.mark.parametrize(
-    "clean, observed, parents, actions, depth",
+    "clean, observed, zone, parent_zone, increment, depth",
     [
         (
             [[10, 10], [10, 20]],
             [[0, 0], [20, 10]],
+            [0, 0, 1],
             [0, 0, 0],
-            [1, 0, 2],
+            [0, 0, 1],
             [[0, 0], [0, 1]],
         ),
         (
             [[10, 10, 10], [10, 20, 30]],
             [[0, 0, 0], [10, 20, 10]],
-            [0, 0, 0, 2],
-            [1, 0, 2, 2],
+            [0, 0, 1, 2],
+            [0, 0, 0, 1],
+            [0, 0, 1, 1],
             [[0, 0, 0], [0, 1, 2]],
         ),
         (
             [[10, 20, 30]],
             [[11, 21, 31]],
+            [0, 1, 2],
             [0, 0, 1],
-            [1, 2, 2],
+            [0, 1, 1],
             [[0, 1, 2]],
         ),
-        ([[10]], [[200]], [0], [1], [[0]]),
+        ([[10]], [[200]], [0], [0], [0], [[0]]),
         (
             [[10, 10, 20, 10, 10]],
             [[11, 15, 15, 15, 12]],
+            [0, 0, 2],
             [0, 0, 0],
-            [1, 0, 1],
+            [0, 0, 0],
             [[0, 0, 0, 0, 0]],
         ),
         (
             [[10, 10, 10], [20, 20, 20]],
             [[11, 15, 12], [21, 15, 22]],
-            [0, 0, 0, 0, 3],
-            [1, 0, 0, 2, 0],
+            [0, 0, 0, 1, 1],
+            [0, 0, 0, 0, 0],
+            [0, 0, 0, 1, 1],
             [[0, 0, 0], [1, 0, 1]],
         ),
     ],
@@ -247,7 +262,9 @@ def test_random_refining_recovery_with_permuted_ids(kind):
         "disconnected-output-group",
     ],
 )
-def test_named_two_dimensional_recovery(kind, clean, observed, parents, actions, depth):
+def test_named_two_dimensional_recovery(
+    kind, clean, observed, zone, parent_zone, increment, depth
+):
     clean = np.array(clean, dtype=np.uint8)
     observed = np.array(observed, dtype=np.uint8)
     if kind == ComponentTreeKind.MIN_TREE:
@@ -256,7 +273,8 @@ def test_named_two_dimensional_recovery(kind, clean, observed, parents, actions,
     clean_graph, clean_tree = _checked_graph(clean, kind)
     observed_graph, _ = _checked_graph(observed, kind)
     targets, _ = derive_correction_targets(clean_graph, clean_tree, observed_graph)
-    np.testing.assert_array_equal(targets.corrective_parents, parents)
-    np.testing.assert_array_equal(targets.actions, actions)
-    _, pixel_depth = _inspect_targets(observed_graph, targets)
+    np.testing.assert_array_equal(targets.zone, zone)
+    np.testing.assert_array_equal(targets.parent_zone, parent_zone)
+    np.testing.assert_array_equal(targets.increment, increment)
+    _, _, pixel_depth = _inspect_targets(clean_graph, observed_graph, targets)
     np.testing.assert_array_equal(pixel_depth, depth)

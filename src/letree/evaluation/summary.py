@@ -19,6 +19,11 @@ def reduce_records(records: list[dict]) -> dict[str, float]:
         "coverage": len(valid) / len(records),
         "exact_recovery": float(np.mean([record["exact"] for record in records])),
     }
+    # Counted over every record, failed decodes included, to show how far off they are
+    for name in ("groups", "root_claims"):
+        summary[f"{name}/sample_mean"] = float(
+            np.mean([record[name] for record in records])
+        )
     for reason in DecodeFailureReason:
         summary[f"failures/{reason}"] = sum(
             record["failure"] == reason for record in records

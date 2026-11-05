@@ -31,7 +31,7 @@ SMALL_IMAGES = SquareImageConfig(
 NOISES = (SaltAndPepperNoise(probability=0.05),)
 
 
-def test_all_three_losses_fall_on_a_few_graphs(square_family) -> None:
+def test_all_four_losses_fall_on_a_few_graphs(square_family) -> None:
     # A learning check for target indexing and gradient flow, not learnability
     family = square_family(1, 0, NOISES, 2)
     batch = Batch.from_data_list([to_graph(o.tree_image, o.targets) for o in family])
@@ -40,7 +40,7 @@ def test_all_three_losses_fall_on_a_few_graphs(square_family) -> None:
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
 
     def losses():
-        output = model(batch.x, batch.edge_index, batch.ptr, 2, 1)
+        output = model(batch.x, batch.edge_index, batch.rag_edge_index, batch.ptr, 2, 1)
         return correction_losses(output, batch)
 
     initial = {name: loss.item() for name, loss in losses().items()}
@@ -83,7 +83,7 @@ def test_fit_writes_run_records_and_resumes(dataset_root, tmp_path) -> None:
     assert settings["settings"]["observed_steps"] == 2
     assert settings["dataset_manifest"]["split_sample_counts"]["train"] == 3
     scores = [entry["validation"][SELECTION_METRIC] for entry in history]
-    assert best == history[scores.index(max(scores))]
+    assert best == history[scores.index(min(scores))]
     assert best["validation"]["all/images"] == 3
     assert {path.name for path in run.iterdir()} == {
         "settings.json",
@@ -114,9 +114,15 @@ def test_validation_reports_every_noise_kind_on_the_same_images(make_dataset):
     assert summary["noisy/images"] == 12
     assert sum(summary[f"{kind}/nodes"] for kind in kinds) == summary["noisy/nodes"]
     # The noisy image mean is the mean of equally sized kinds
-    joint = "joint_correction_accuracy/image_mean"
+    joint = "joint_accuracy/image_mean"
     assert summary[f"noisy/{joint}"] == pytest.approx(
         sum(summary[f"{kind}/{joint}"] for kind in kinds) / 4
+    )
+    # Checkpoints are chosen on the summed corrective losses, observed loss left out
+    assert summary[SELECTION_METRIC] == pytest.approx(
+        summary["loss/set_pointer"]
+        + summary["loss/contraction"]
+        + summary["loss/increment"]
     )
     assert summary["max_length/query"] > 0
     assert summary["max_length/key"] > 0
@@ -145,17 +151,19 @@ def test_unknown_compile_setting_is_rejected() -> None:
 def _history_entry(epoch, score, groups=("clean", "noisy")):
     validation = {
         "loss/observed_parent": 0.5,
-        "loss/corrective_parent": 0.25,
-        "loss/action": 0.125,
+        "loss/set_pointer": 0.25,
+        "loss/contraction": 0.125,
+        "loss/increment": 0.0625,
         "max_length/query": 12.5,
         "max_length/key": 3.5,
         SELECTION_METRIC: score,
     }
     accuracies = {
         "observed_parent_accuracy": 0.9,
-        "corrective_parent_accuracy": 0.8,
-        "action_accuracy": 0.7,
-        "joint_correction_accuracy": 0.6,
+        "set_pointer_accuracy": 0.8,
+        "increment_accuracy": 0.7,
+        "joint_accuracy": 0.6,
+        "edge_accuracy": 0.5,
     }
     for group in groups:
         validation[f"{group}/images"] = 1
@@ -167,7 +175,12 @@ def _history_entry(epoch, score, groups=("clean", "noisy")):
         "epoch": epoch,
         "seconds": 12.0,
         "learning_rate": 1e-3,
-        "train": {"observed_parent": 1.0, "corrective_parent": 2.0, "action": 4.0},
+        "train": {
+            "observed_parent": 1.0,
+            "set_pointer": 2.0,
+            "contraction": 4.0,
+            "increment": 8.0,
+        },
         "validation": validation,
     }
 
@@ -178,18 +191,18 @@ def _row(report, label):
 
 
 def test_epoch_report_separates_losses_and_groups() -> None:
-    history = [_history_entry(0, 0.4), _history_entry(1, 0.6), _history_entry(2, 0.5)]
+    history = [_history_entry(0, 0.6), _history_entry(1, 0.4), _history_entry(2, 0.5)]
     report = epoch_report(history, stale=1, patience=10)
 
     assert report.splitlines()[0] == "epoch 2  lr 1.0e-03  12s"
-    assert _row(report, "train (epoch mean)") == [1.0, 2.0, 4.0, 7.0]
-    assert _row(report, "val ") == [0.5, 0.25, 0.125, 0.875]
-    assert _row(report, "val clean") == [0.95, 0.85, 0.75, 0.65]
-    assert _row(report, "val noisy") == [0.9, 0.8, 0.7, 0.6]
+    assert _row(report, "train (epoch mean)") == [1.0, 2.0, 4.0, 8.0, 15.0]
+    assert _row(report, "val ") == [0.5, 0.25, 0.125, 0.0625, 0.9375]
+    assert _row(report, "val clean") == [0.95, 0.85, 0.75, 0.65, 0.55]
+    assert _row(report, "val noisy") == [0.9, 0.8, 0.7, 0.6, 0.5]
     assert "  max length, val         query 12.5  key 3.5" in report.splitlines()
     # Epoch 1 improved, epoch 2 did not
     assert report.splitlines()[-1] == (
-        "  selection (val joint, image mean) 0.5000  best 0.6000 at epoch 1  stale 1/10"
+        "  selection (val corrective loss) 0.5000  best 0.4000 at epoch 1  stale 1/10"
     )
 
 

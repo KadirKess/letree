@@ -3,8 +3,13 @@ import pytest
 
 from letree.component_tree import ComponentTreeKind
 from letree.data.families import build_family
-from letree.evaluation.records import clean_reference, score_record
-from letree.evaluation.scores import tree_correction
+from letree.evaluation.records import (
+    GraphPrediction,
+    clean_reference,
+    decode_source,
+    oracle_pointers,
+    score_record,
+)
 from letree.generation import AdditiveGaussianNoise, SaltAndPepperNoise
 
 NOISES = (SaltAndPepperNoise(probability=0.1), AdditiveGaussianNoise(10.0))
@@ -31,16 +36,31 @@ def _families(count, kind=ComponentTreeKind.MAX_TREE):
     ]
 
 
-def _records(source, observation, clean):
-    tree = observation.tree_image
-    if source == "oracle":
-        prediction = (
-            observation.targets.corrective_parents,
-            observation.targets.actions,
-        )
+def _records(source, observation, clean, prediction=None):
+    counts, hierarchy = decode_source(source, observation, prediction)
+    return counts | score_record(hierarchy, observation, clean_reference(clean))
+
+
+def _target_prediction(observation, soft_pointers=False):
+    """A model output that puts all its weight on the targets."""
+    targets = observation.targets
+    node_count = targets.zone.size
+    source, destination = observation.tree_image.graph.edge_index.T
+    contracted = targets.zone[source] == targets.zone[destination]
+    pointers = oracle_pointers(targets.zone, targets.parent_zone)
+    if soft_pointers:
+        # Spread evenly over the parent zone, which keeps the vote on it
+        in_parent = targets.zone[None, :] == targets.parent_zone[:, None]
+        probabilities = in_parent / in_parent.sum(axis=1, keepdims=True)
     else:
-        prediction = tree_correction(tree.component_tree.parents, tree.graph.levels)
-    return score_record(*prediction, observation, clean_reference(clean))
+        probabilities = np.eye(node_count)[pointers]
+    return GraphPrediction(
+        contraction_logits=np.where(contracted, 3.0, -3.0),
+        increment_probabilities=np.where(targets.increment == 1, 0.9, 0.1),
+        pointer_probabilities=probabilities,
+        pointers=pointers,
+        ties=0,
+    )
 
 
 @pytest.mark.parametrize(
@@ -101,18 +121,44 @@ def test_pure_and_mixed_pixels_cover_the_image():
                 )
 
 
-def test_two_roots_give_an_invalid_record():
+@pytest.mark.parametrize("soft_pointers", [False, True])
+def test_model_votes_on_the_targets_match_the_oracle(soft_pointers):
+    for family in _families(10):
+        for observation in family:
+            prediction = _target_prediction(observation, soft_pointers)
+            oracle = _records("oracle", observation, family[0])
+            for source in ("model_soft", "model_hard"):
+                record = _records(source, observation, family[0], prediction)
+                assert record == oracle, source
+            assert oracle["root_claims"] == 1
+
+
+def test_self_pointers_give_an_invalid_record():
     family = _families(1)[0]
     observation = family[2]
-    parents = observation.tree_image.component_tree.parents.copy()
-    actions = observation.targets.actions.copy()
-    child = int(np.flatnonzero(parents != np.arange(parents.size))[0])
-    parents[child] = child
-    actions[child] = 1
+    node_count = observation.targets.zone.size
+    # No edge contracts and every node points to itself, so every group is a root
+    prediction = GraphPrediction(
+        contraction_logits=np.full(len(observation.tree_image.graph.edge_index), -1.0),
+        increment_probabilities=np.zeros(node_count),
+        pointer_probabilities=np.eye(node_count),
+        pointers=np.arange(node_count),
+        ties=0,
+    )
 
-    record = score_record(parents, actions, observation, clean_reference(family[0]))
+    for source in ("model_soft", "model_hard"):
+        record = _records(source, observation, family[0], prediction)
+        assert record["valid"] is False
+        assert record["failure"] == "root_count"
+        assert record["exact"] is False
+        assert record["groups"] == record["root_claims"] == node_count
+        assert "lost_zones" not in record
 
-    assert record["valid"] is False
-    assert record["failure"] == "root_count"
-    assert record["exact"] is False
-    assert "lost_zones" not in record
+
+def test_a_logit_of_zero_does_not_contract():
+    family = _families(1)[0]
+    observation = family[0]
+    prediction = _target_prediction(observation)
+    prediction.contraction_logits[:] = 0.0
+    record = _records("model_hard", observation, family[0], prediction)
+    assert record["groups"] == observation.targets.zone.size

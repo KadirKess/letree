@@ -1,18 +1,17 @@
-"""Hard decoding of corrective pointers and actions into a hierarchical structure."""
+"""Hard decoding of contracted groups, their parents and depth increments."""
 
 from dataclasses import dataclass
 from enum import StrEnum
 
 import numpy as np
 from numpy.typing import NDArray
-
-from letree.generation.targets import CorrectionAction
+from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse.csgraph import connected_components
 
 
 class DecodeFailureReason(StrEnum):
     ROOT_COUNT = "root_count"
     NONTRIVIAL_CYCLE = "nontrivial_cycle"
-    INVALID_ROOT_ACTION = "invalid_root_action"
 
 
 class CorrectionDecodeError(ValueError):
@@ -23,63 +22,92 @@ class CorrectionDecodeError(ValueError):
 
 @dataclass
 class DecodedCorrection:
-    # Output nodes are groups of observed nodes with their own identifiers,
-    # not clean identifiers. Each group is defined by one retained observed node.
-    representatives: NDArray[np.int64]
-    observed_to_output: NDArray[np.int64]
+    # Output nodes are the groups of contracted observed nodes
+    groups: NDArray[np.int64]
     parents: NDArray[np.int64]
     increments: NDArray[np.int64]
     depths: NDArray[np.int64]
     pixel_depth: NDArray[np.int64]
 
 
-def decode_correction(
-    corrective_parents: NDArray[np.integer],
-    actions: NDArray[np.integer],
+def contraction_groups(
+    rag_edge_index: NDArray[np.integer],
+    contracted: NDArray[np.bool_],
+    node_count: int,
+) -> NDArray[np.int64]:
+    source, destination = rag_edge_index[:, contracted]
+    # Sparse, because a dense adjacency takes about 115 MB at 3,800 nodes
+    adjacency = coo_matrix(
+        (np.ones(source.size), (source, destination)), shape=(node_count, node_count)
+    )
+    _, groups = connected_components(adjacency, directed=False)
+    return groups.astype(np.int64)
+
+
+def hard_vote(
+    pointers: NDArray[np.integer], groups: NDArray[np.int64]
+) -> NDArray[np.int64]:
+    group_count = groups.max() + 1
+    votes = np.zeros((group_count, group_count), dtype=np.int64)
+    np.add.at(votes, (groups, groups[pointers]), 1)
+    return votes
+
+
+def soft_vote(
+    pointer_probabilities: NDArray[np.floating], groups: NDArray[np.int64]
+) -> NDArray[np.float64]:
+    node_count = groups.size
+    # With membership M[i, g], the votes are M transposed times P times M
+    membership = csr_matrix(
+        (np.ones(node_count), (np.arange(node_count), groups)),
+        shape=(node_count, groups.max() + 1),
+    )
+    return np.asarray((membership.T @ pointer_probabilities) @ membership)
+
+
+def group_increments(
+    values: NDArray[np.floating], groups: NDArray[np.int64]
+) -> NDArray[np.int64]:
+    # Strictly above one half, so a tie gives 0
+    means = np.bincount(groups, weights=values) / np.bincount(groups)
+    return (means > 0.5).astype(np.int64)
+
+
+def decode_groups(
+    groups: NDArray[np.int64],
+    votes: NDArray[np.number],
+    increments: NDArray[np.int64],
     observed_label_map: NDArray[np.integer],
 ) -> DecodedCorrection:
-    """Decode hard predictions or oracle targets for one observed image."""
-
-    root = _validate_predictions(corrective_parents, actions)
-    representative_for_node = _resolve_merge_representatives(
-        corrective_parents, actions
-    )
-    representatives, observed_to_output, parents, increments = _contract_tree(
-        corrective_parents, actions, representative_for_node
-    )
-    depths = _accumulate_depths(parents, increments, observed_to_output[root])
-
-    # Every pixel of an observed zone gets the depth of the group it joined
-    pixel_depth = depths[observed_to_output[observed_label_map]]
-
-    return DecodedCorrection(
-        representatives=representatives,
-        observed_to_output=observed_to_output,
-        parents=parents,
-        increments=increments,
-        depths=depths,
-        pixel_depth=pixel_depth,
-    )
+    # A tie goes to the smallest group id
+    parents = votes.argmax(axis=1)
+    root = _find_root(parents)
+    depths = _accumulate_depths(parents, increments, root)
+    pixel_depth = depths[groups[observed_label_map]]
+    return DecodedCorrection(groups, parents, increments, depths, pixel_depth)
 
 
-def _validate_predictions(
-    corrective_parents: NDArray[np.integer], actions: NDArray[np.integer]
-) -> int:
-    """Reject the structural failures a trained model can produce."""
+def tree_pixel_depth(
+    node_parents: NDArray[np.integer],
+    levels: NDArray[np.integer],
+    label_map: NDArray[np.integer],
+) -> NDArray[np.int64]:
+    # A level change adds one depth step and an equal-level link adds none
+    increments = (levels != levels[node_parents]).astype(np.int64)
+    root = _find_root(node_parents)
+    depths = _accumulate_depths(node_parents, increments, root)
+    return depths[label_map]
 
-    n = corrective_parents.size
-    roots = np.flatnonzero(corrective_parents == np.arange(n))
+
+def _find_root(parents: NDArray[np.integer]) -> int:
+    n = parents.size
+    roots = np.flatnonzero(parents == np.arange(n))
     if roots.size != 1:
         raise CorrectionDecodeError(
             DecodeFailureReason.ROOT_COUNT,
             message=f"Expected exactly one self-parent root, found {roots.size}.",
         )
     root = int(roots[0])
-    if actions[root] != CorrectionAction.KEEP_ZERO:
-        raise CorrectionDecodeError(
-            DecodeFailureReason.INVALID_ROOT_ACTION,
-            message="Root node must have action KEEP_ZERO (1).",
-        )
 
     # State 0 is unvisited, 1 is on the current chain and 2 is known to reach the
     # root. Reaching a 1 again means the chain looped back on itself.
@@ -94,7 +122,7 @@ def _validate_predictions(
         while state[node] == 0:
             path.append(node)
             state[node] = 1
-            node = corrective_parents[node]
+            node = parents[node]
 
         if state[node] == 1:
             raise CorrectionDecodeError(
@@ -105,64 +133,6 @@ def _validate_predictions(
         state[path] = 2
 
     return root
-
-
-def _resolve_merge_representatives(
-    corrective_parents: NDArray[np.integer],
-    actions: NDArray[np.integer],
-) -> NDArray[np.int64]:
-    n = corrective_parents.size
-
-    # Retained nodes are their own representative, merge nodes start unresolved
-    representative_for_node = np.where(
-        actions != CorrectionAction.MERGE, np.arange(n, dtype=np.int64), -1
-    )
-
-    for start in range(n):
-        if representative_for_node[start] != -1:
-            continue
-
-        # In theory, the model should make noise nodes merge directly to a
-        # representative, but we don't have any guarantee of that.
-        path = []
-        node = start
-        while representative_for_node[node] == -1:
-            path.append(node)
-            node = corrective_parents[node]
-
-        representative_for_node[path] = representative_for_node[node]
-
-    return representative_for_node
-
-
-def _contract_tree(
-    corrective_parents: NDArray[np.integer],
-    actions: NDArray[np.integer],
-    representative_for_node: NDArray[np.int64],
-) -> tuple[
-    NDArray[np.int64],
-    NDArray[np.int64],
-    NDArray[np.int64],
-    NDArray[np.int64],
-]:
-    # Output identifiers follow increasing retained observed identifier
-    representatives = np.flatnonzero(actions != CorrectionAction.MERGE)
-    output_node_count = representatives.size
-
-    # Output id of each retained node, left at -1 for merge nodes
-    output_id_for_representative = np.full(corrective_parents.size, -1, dtype=np.int64)
-    output_id_for_representative[representatives] = np.arange(output_node_count)
-
-    observed_to_output = output_id_for_representative[representative_for_node]
-
-    # A retained node can point at a merge node, so its pointer goes through
-    # observed_to_output. Copying the observed pointer would mix identifier spaces.
-    parents = observed_to_output[corrective_parents[representatives]]
-    increments = (actions[representatives] == CorrectionAction.KEEP_ONE).astype(
-        np.int64
-    )
-
-    return representatives, observed_to_output, parents, increments
 
 
 def _accumulate_depths(
@@ -179,8 +149,8 @@ def _accumulate_depths(
         if parent != node:
             children[parent].append(node)
 
-    # Depth comes from increments, so a KEEP_ZERO child sits at its parent's
-    # depth. A parent's depth is set before its children are pushed.
+    # Depth comes from increments, so a child with increment 0 sits at its
+    # parent's depth. A parent's depth is set before its children are pushed.
     depths = np.zeros(output_node_count, dtype=np.int64)
     pending = [root]
     while pending:

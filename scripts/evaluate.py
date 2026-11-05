@@ -6,6 +6,7 @@ uv run python scripts/evaluate.py RUN_DIRECTORY DATASET --split test
 import argparse
 
 from letree.evaluation.checkpoint import run_evaluation
+from letree.evaluation.records import SOURCES
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -40,9 +41,14 @@ def main() -> None:
             if value is not None
         },
     )
-    names = ("coverage", "exact_recovery", "all/misassigned_pixels/sample_mean")
+    names = (
+        "coverage",
+        "exact_recovery",
+        "root_claims/sample_mean",
+        "all/misassigned_pixels/sample_mean",
+    )
     for group in ("clean", "noisy"):
-        for source in ("model", "observed", "oracle"):
+        for source in SOURCES:
             prefix = f"{source}/{group}/every"
             values = [summary.get(f"{prefix}/{name}", float("nan")) for name in names]
             print(group, source, *(f"{name} {v:.4f}" for name, v in zip(names, values)))

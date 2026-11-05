@@ -50,19 +50,18 @@ def round_to_tf32(values: Tensor) -> Tensor:
     return values + (rounded - values).detach()
 
 
-def same_graph_block_mask(graph_ptr: Tensor) -> BlockMask:
-    node_count = int(graph_ptr[-1])
-    graph_ids = torch.repeat_interleave(
+def node_graph_ids(graph_ptr: Tensor) -> Tensor:
+    return torch.repeat_interleave(
         torch.arange(graph_ptr.numel() - 1, device=graph_ptr.device), graph_ptr.diff()
     )
 
-    def same_graph(batch, head, query_index, key_index):
-        return graph_ids[query_index] == graph_ids[key_index]
 
+def node_pair_block_mask(keep, graph_ptr: Tensor) -> BlockMask:
+    node_count = int(graph_ptr[-1])
     # Uncompiled, the mask function runs on every node pair and needs n by n
     # memory, which runs out on a GPU near 40,000 nodes
     return create_block_mask(
-        same_graph,
+        keep,
         None,
         None,
         node_count,
@@ -70,6 +69,29 @@ def same_graph_block_mask(graph_ptr: Tensor) -> BlockMask:
         device=graph_ptr.device,
         _compile=graph_ptr.is_cuda,
     )
+
+
+def same_graph_block_mask(graph_ptr: Tensor) -> BlockMask:
+    graph_ids = node_graph_ids(graph_ptr)
+
+    def same_graph(batch, head, query_index, key_index):
+        return graph_ids[query_index] == graph_ids[key_index]
+
+    return node_pair_block_mask(same_graph, graph_ptr)
+
+
+def target_set_block_mask(
+    zone: Tensor, parent_zone: Tensor, graph_ptr: Tensor
+) -> BlockMask:
+    graph_ids = node_graph_ids(graph_ptr)
+
+    # Zone ids are local to each graph, so the same id in another graph is
+    # another zone
+    def in_target_set(batch, head, query_index, key_index):
+        same_graph = graph_ids[query_index] == graph_ids[key_index]
+        return same_graph & (zone[key_index] == parent_zone[query_index])
+
+    return node_pair_block_mask(in_target_set, graph_ptr)
 
 
 def flex_kernel_options(device: torch.device) -> dict[str, int]:
@@ -96,3 +118,30 @@ def flex_graph_attention(
         return_aux=AuxRequest(lse=True),
     )
     return message[0, 0], aux.lse[0, 0]
+
+
+def readable_target_set_log_z(
+    query: Tensor, key: Tensor, zone: Tensor, parent_zone: Tensor, graph_ptr: Tensor
+) -> Tensor:
+    """Per node, log of the summed exponential scores over its parent zone."""
+    scaled_query = query / sqrt(query.shape[1])
+    log_z = query.new_empty(zone.shape)
+
+    bounds = graph_ptr.tolist()
+    for start, stop in zip(bounds[:-1], bounds[1:]):
+        scores = scaled_query[start:stop] @ key[start:stop].T
+        in_target_set = zone[None, start:stop] == parent_zone[start:stop, None]
+        log_z[start:stop] = torch.logsumexp(
+            scores.masked_fill(~in_target_set, float("-inf")), dim=1
+        )
+    return log_z
+
+
+def flex_target_set_log_z(
+    query: Tensor, key: Tensor, zone: Tensor, parent_zone: Tensor, graph_ptr: Tensor
+) -> Tensor:
+    """The readable target set log Z, streamed in tiles as Flex attention."""
+    block_mask = target_set_block_mask(zone, parent_zone, graph_ptr)
+    # Only the log normaliser is kept, so the values can be anything
+    _, log_z = flex_graph_attention(query, key, torch.zeros_like(query), block_mask)
+    return log_z

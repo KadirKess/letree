@@ -2,16 +2,15 @@
 
 import json
 from dataclasses import replace
+from math import sqrt
 from pathlib import Path
 
-import numpy as np
 import torch
-from numpy.typing import NDArray
 from torch_geometric.data import Batch
 from tqdm import tqdm
 
 from letree.data.graphs import ObservationDataset, make_loader
-from letree.evaluation.records import sample_records
+from letree.evaluation.records import GraphPrediction, sample_records
 from letree.evaluation.summary import summarize_records, write_records
 from letree.experiments.metrics import graph_local_argmax
 from letree.experiments.train import (
@@ -46,19 +45,49 @@ def load_run_model(
 @torch.no_grad()
 def predict(
     model: LetreeModel, settings: RunSettings, data: Batch
-) -> tuple[NDArray[np.int64], NDArray[np.int64], NDArray[np.bool_]]:
-    """Graph-local corrective parents, actions and tie flags at the last step."""
+) -> list[GraphPrediction]:
+    """Outputs of the last corrective step for every graph of the batch."""
     output = model(
         data.x,
         data.edge_index,
+        data.rag_edge_index,
         data.ptr,
         settings.observed_steps,
         settings.correction_steps,
     )
     step = output.corrective[-1]
-    parents, tied = graph_local_argmax(step.query, step.key, data.ptr)
-    actions = output.actions[-1].argmax(dim=1)
-    return parents.cpu().numpy(), actions.cpu().numpy(), tied.cpu().numpy()
+    pointers, tied = graph_local_argmax(step.query, step.key, data.ptr)
+    increment_probabilities = torch.sigmoid(output.increment[-1])
+    contraction_logits = output.contraction[-1]
+    # Same scale as the losses, so these are the probabilities the model was trained on
+    scaled_query = step.query / sqrt(step.query.shape[1])
+
+    # Batching keeps each graph's RAG edges together and in stored order
+    edge_counts = torch.bincount(
+        data.batch[data.rag_edge_index[0]], minlength=data.num_graphs
+    )
+    node_bounds = data.ptr.tolist()
+    edge_bounds = [0, *torch.cumsum(edge_counts, 0).tolist()]
+
+    predictions = []
+    for graph in range(data.num_graphs):
+        nodes = slice(node_bounds[graph], node_bounds[graph + 1])
+        edges = slice(edge_bounds[graph], edge_bounds[graph + 1])
+        scores = scaled_query[nodes] @ step.key[nodes].T
+        predictions.append(
+            GraphPrediction(
+                contraction_logits=contraction_logits[edges].float().cpu().numpy(),
+                increment_probabilities=(
+                    increment_probabilities[nodes].float().cpu().numpy()
+                ),
+                pointer_probabilities=torch.softmax(scores.float(), dim=1)
+                .cpu()
+                .numpy(),
+                pointers=pointers[nodes].cpu().numpy(),
+                ties=int(tied[nodes].sum()),
+            )
+        )
+    return predictions
 
 
 def evaluate_checkpoint(
@@ -75,14 +104,10 @@ def evaluate_checkpoint(
     loader = make_loader(dataset, batch_size, False, settings.seed, num_workers)
     records = []
     for data in tqdm(loader, desc=split, mininterval=PROGRESS_SECONDS):
-        parents, actions, tied = predict(model, settings, data.to(device))
-        bounds = data.ptr.tolist()
-        for index, item in enumerate(data.item.tolist()):
-            nodes = slice(bounds[index], bounds[index + 1])
+        predictions = predict(model, settings, data.to(device))
+        for item, prediction in zip(data.item.tolist(), predictions):
             path, position = dataset.items[item]
-            records += sample_records(
-                path, position, parents[nodes], actions[nodes], int(tied[nodes].sum())
-            )
+            records += sample_records(path, position, prediction)
     return records
 
 

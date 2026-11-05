@@ -23,12 +23,11 @@ from letree.generation.noise import (
 from letree.generation.samples import TreeImage, build_generation_sample
 from letree.generation.seeds import GenerationStage, derive_rng
 from letree.generation.targets import (
-    CorrectionAction,
     CorrectionDiagnostics,
     CorrectionTargets,
 )
 
-CORRECTION_TARGET_POLICY = "pixel_count_representative_v1"
+CORRECTION_TARGET_POLICY = "zone_parent_increment_v1"
 
 # Each corruption family draws from its own stream so that adding one family
 # never changes the realizations of another.
@@ -107,35 +106,50 @@ def check_family(family: list[Observation]) -> None:
     keys = [(observation.noise, observation.realization) for observation in family]
     if len(set(keys)) != len(keys):
         raise ValueError("Realization indices must be unique within a noise kind.")
+    # Every observation of a family shares the clean image of position zero.
+    clean_zone_count = family[0].tree_image.graph.levels.size
     for observation in family:
-        check_targets(observation.targets)
+        check_targets(observation.targets, clean_zone_count)
 
 
-def check_targets(targets: CorrectionTargets) -> None:
-    """Corrective parents must form one tree under a self-parented KEEP_ZERO root."""
-    parents, actions = targets.corrective_parents, targets.actions
-    node_count = parents.size
-    if np.any((parents < 0) | (parents >= node_count)):
-        raise ValueError("corrective_parents must use local observed node identifiers.")
-    roots = np.flatnonzero(parents == np.arange(node_count))
-    if roots.size != 1 or actions[roots[0]] != CorrectionAction.KEEP_ZERO:
-        raise ValueError(
-            "Correction targets must have one self-parented KEEP_ZERO root."
-        )
+def check_targets(targets: CorrectionTargets, clean_zone_count: int) -> None:
+    """Nodes of a zone share their targets, and the zones form one rooted tree."""
+    zone, parent_zone, increment = targets.zone, targets.parent_zone, targets.increment
+    for ids in (zone, parent_zone):
+        if np.any((ids < 0) | (ids >= clean_zone_count)):
+            raise ValueError("Zones must use clean zone identifiers.")
+    if np.any((increment != 0) & (increment != 1)):
+        raise ValueError("Increments must be 0 or 1.")
 
-    # A node is settled once its path reaches the root. Meeting a node of the
+    # One entry per clean zone. A repeated zone keeps one of its writes, so any
+    # node that disagrees with its zone shows up in the comparison below.
+    zone_parent = np.full(clean_zone_count, -1, dtype=np.int64)
+    zone_increment = np.full(clean_zone_count, -1, dtype=np.int64)
+    zone_parent[zone] = parent_zone
+    zone_increment[zone] = increment
+    if np.any(zone_parent[zone] != parent_zone) or np.any(
+        zone_increment[zone] != increment
+    ):
+        raise ValueError("Nodes of one zone must share parent zone and increment.")
+    if np.any(zone_parent[parent_zone] == -1):
+        raise ValueError("Parent zones must be zones of observed nodes.")
+
+    represented = np.unique(zone)
+    roots = represented[zone_parent[represented] == represented]
+    if roots.size != 1 or zone_increment[roots[0]] != 0:
+        raise ValueError("Exactly one zone must be its own parent, with increment 0.")
+
+    # A zone is settled once its path reaches the root. Meeting a zone of the
     # current path again before that means a cycle.
-    settled = np.zeros(node_count, dtype=bool)
+    settled = np.zeros(clean_zone_count, dtype=bool)
     settled[roots[0]] = True
-    for start in range(node_count):
-        path, node = set(), start
-        while not settled[node]:
-            if node in path:
-                raise ValueError(
-                    "Correction pointers contain a cycle outside the root."
-                )
-            path.add(node)
-            node = int(parents[node])
+    for start in represented:
+        path, current = set(), int(start)
+        while not settled[current]:
+            if current in path:
+                raise ValueError("Parent zones contain a cycle outside the root.")
+            path.add(current)
+            current = int(zone_parent[current])
         settled[list(path)] = True
 
 
@@ -164,10 +178,9 @@ def save_family(path: Path, family: list[Observation], source: str) -> None:
         arrays[f"{position}/parents"] = tree_image.component_tree.parents
         for name in TREE_FIELDS:
             arrays[f"{position}/{name}"] = getattr(tree_image.graph, name)
-        arrays[f"{position}/corrective_parents"] = (
-            observation.targets.corrective_parents
-        )
-        arrays[f"{position}/actions"] = observation.targets.actions
+        arrays[f"{position}/zone"] = observation.targets.zone
+        arrays[f"{position}/parent_zone"] = observation.targets.parent_zone
+        arrays[f"{position}/increment"] = observation.targets.increment
         for name in DIAGNOSTIC_FIELDS:
             arrays[f"{position}/{name}"] = np.asarray(
                 getattr(observation.diagnostics, name)
@@ -211,7 +224,7 @@ def _read_observation(arrays, position: int) -> Observation:
         noise=str(arrays["noise"][position]),
         realization=int(arrays["realization"][position]),
         tree_image=tree_image,
-        targets=CorrectionTargets(read("corrective_parents"), read("actions")),
+        targets=CorrectionTargets(read("zone"), read("parent_zone"), read("increment")),
         diagnostics=CorrectionDiagnostics(**diagnostics),
     )
 

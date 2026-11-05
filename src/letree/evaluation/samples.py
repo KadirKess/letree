@@ -5,11 +5,10 @@ from pathlib import Path
 import numpy as np
 from torch_geometric.data import Batch
 
-from letree.correction.decoder import CorrectionDecodeError, decode_correction
 from letree.data.families import load_observation
 from letree.data.graphs import to_graph
 from letree.evaluation.checkpoint import predict
-from letree.evaluation.records import clean_reference, source_predictions
+from letree.evaluation.records import SOURCES, clean_reference, decode_source
 from letree.evaluation.scores import pixel_errors
 
 
@@ -68,15 +67,12 @@ def sample_maps(
             for _, _, observation in stored
         ]
     )
-    parents, actions, _ = predict(model, settings, data.to(device))
-    bounds = data.ptr.tolist()
+    predictions = predict(model, settings, data.to(device))
 
     samples = []
-    for index, (key, path, observation) in enumerate(stored):
-        nodes = slice(bounds[index], bounds[index + 1])
+    for (key, path, observation), prediction in zip(stored, predictions):
         clean = load_observation(path, 0)
         clean_labels, clean_depth, _ = clean_reference(clean)
-        label_map = observation.tree_image.graph.label_map
         sample = {
             "key": key,
             "corruption": observation.noise,
@@ -84,23 +80,18 @@ def sample_maps(
             "image": observation.tree_image.image,
             "clean_labels": clean_labels,
             "clean_depth": clean_depth,
-            "observed_labels": label_map,
+            "observed_labels": observation.tree_image.graph.label_map,
         }
-        predictions = source_predictions(observation, parents[nodes], actions[nodes])
-        for source, (source_parents, source_actions) in predictions.items():
-            try:
-                decoded = decode_correction(source_parents, source_actions, label_map)
-            except CorrectionDecodeError as error:
-                sample[source] = {"failure": str(error.reason)}
+        for source in SOURCES:
+            counts, hierarchy = decode_source(source, observation, prediction)
+            if hierarchy is None:
+                sample[source] = counts
                 continue
-            groups = decoded.observed_to_output[label_map]
-            errors = pixel_errors(
-                groups, decoded.pixel_depth, clean_labels, clean_depth
-            )
-            sample[source] = {
-                "failure": None,
-                "groups": groups,
-                "depth": decoded.pixel_depth,
+            groups, depth = hierarchy
+            errors = pixel_errors(groups, depth, clean_labels, clean_depth)
+            sample[source] = counts | {
+                "group_map": groups,
+                "depth": depth,
                 "misassigned": errors.misassigned,
                 "depth_difference": errors.depth_difference,
             }

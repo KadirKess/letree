@@ -8,7 +8,9 @@ from torch.nn.attention.flex_attention import create_block_mask
 
 from letree.attention import (
     flex_graph_attention,
+    flex_target_set_log_z,
     readable_graph_attention,
+    readable_target_set_log_z,
     round_to_tf32,
     same_graph_block_mask,
 )
@@ -106,7 +108,7 @@ def _model_inputs(device="cpu", dtype=torch.float64):
     features = torch.rand(333, 3, generator=generator, dtype=dtype)
     # A chain inside each graph with self loops, enough for the recurrent update
     graph_ptr = torch.tensor([0, 5, 6, 200, 333])
-    sources, destinations = [], []
+    sources, destinations, rag_edges = [], [], []
     for start, stop in zip(graph_ptr[:-1].tolist(), graph_ptr[1:].tolist()):
         for node in range(start, stop):
             sources.append(node)
@@ -114,8 +116,15 @@ def _model_inputs(device="cpu", dtype=torch.float64):
             if node + 1 < stop:
                 sources += [node, node + 1]
                 destinations += [node + 1, node]
+                rag_edges.append((node, node + 1))
     edge_index = torch.tensor([sources, destinations])
-    return features.to(device), edge_index.to(device), graph_ptr.to(device)
+    rag_edge_index = torch.tensor(rag_edges).T
+    return (
+        features.to(device),
+        edge_index.to(device),
+        rag_edge_index.to(device),
+        graph_ptr.to(device),
+    )
 
 
 def test_flex_model_matches_dense_model_forward():
@@ -133,7 +142,9 @@ def test_flex_model_matches_dense_model_forward():
     ):
         torch.testing.assert_close(a.message, e.message)
         torch.testing.assert_close(a.log_z, e.log_z)
-    for a, e in zip(actual.actions, expected.actions, strict=True):
+    for a, e in zip(actual.increment, expected.increment, strict=True):
+        torch.testing.assert_close(a, e)
+    for a, e in zip(actual.contraction, expected.contraction, strict=True):
         torch.testing.assert_close(a, e)
 
 
@@ -188,21 +199,26 @@ def test_compiled_block_mask_matches_the_eager_one():
 @cuda
 def test_flex_model_parameter_gradients_match_dense_on_cuda():
     dense, flex = _model_pair("cuda", torch.float32)
-    features, edge_index, graph_ptr = _model_inputs("cuda", torch.float32)
+    features, edge_index, rag_edge_index, graph_ptr = _model_inputs(
+        "cuda", torch.float32
+    )
     sizes = graph_ptr.diff()
     # Local parent targets that point at the previous node of each graph
     targets = torch.cat([torch.arange(int(n), device="cuda").roll(1) for n in sizes])
+    zone, parent_zone = _zones(graph_ptr)
     data = SimpleNamespace(
         ptr=graph_ptr,
         batch=torch.repeat_interleave(torch.arange(len(sizes), device="cuda"), sizes),
         num_graphs=len(sizes),
+        rag_edge_index=rag_edge_index,
         observed_parents=targets,
-        corrective_parents=targets,
-        correction_actions=torch.zeros_like(targets),
+        zone=zone,
+        parent_zone=parent_zone,
+        increment=(zone != parent_zone).long(),
     )
-    for model in (dense, flex):
-        output = model(features, edge_index, graph_ptr, 2, 2)
-        sum(correction_losses(output, data).values()).backward()
+    for model, attention in ((dense, "dense"), (flex, "flex")):
+        output = model(features, edge_index, rag_edge_index, graph_ptr, 2, 2)
+        sum(correction_losses(output, data, attention).values()).backward()
 
     for (name, a), (_, e) in zip(
         flex.named_parameters(), dense.named_parameters(), strict=True
@@ -269,3 +285,88 @@ def test_tf32_flex_log_z_matches_float64_on_large_scores():
     # 0.1 percent of that, while rounded ones only differ in summation order.
     assert (expected.abs().max() > 10_000).item()
     torch.testing.assert_close(log_z.double(), expected, rtol=0, atol=0.5)
+
+
+def _zones(graph_ptr):
+    # Local zones of three consecutive nodes, each pointing at the zone with
+    # half its id, so ids collide across graphs and every target set exists
+    zone = torch.cat(
+        [torch.arange(int(n), device=graph_ptr.device) // 3 for n in graph_ptr.diff()]
+    )
+    return zone, zone // 2
+
+
+def _dense_target_set_log_z(query, key, zone, parent_zone, graph_ptr):
+    # Log of the softmax mass on the target set plus the full log Z, graph by graph
+    values = []
+    bounds = graph_ptr.tolist()
+    for start, stop in zip(bounds[:-1], bounds[1:]):
+        for i in range(start, stop):
+            scores = key[start:stop] @ query[i] / sqrt(query.shape[1])
+            members = [
+                j for j in range(stop - start) if zone[start + j] == parent_zone[i]
+            ]
+            mass = F.softmax(scores, 0)[members].sum()
+            values.append(torch.log(mass) + torch.logsumexp(scores, 0))
+    return torch.stack(values)
+
+
+def test_target_set_log_z_matches_a_dense_computation():
+    query, key, _, graph_ptr = _packed_inputs()
+    zone, parent_zone = _zones(graph_ptr)
+
+    expected = _dense_target_set_log_z(query, key, zone, parent_zone, graph_ptr)
+
+    torch.testing.assert_close(
+        readable_target_set_log_z(query, key, zone, parent_zone, graph_ptr), expected
+    )
+    torch.testing.assert_close(
+        flex_target_set_log_z(query, key, zone, parent_zone, graph_ptr), expected
+    )
+
+
+@pytest.mark.parametrize(
+    "target_set_log_z", [readable_target_set_log_z, flex_target_set_log_z]
+)
+def test_target_set_of_the_whole_graph_gives_the_full_log_z(target_set_log_z):
+    query, key, hidden, graph_ptr = _packed_inputs()
+    # One zone per graph, which is its own parent zone
+    zone = torch.zeros(333, dtype=torch.long)
+
+    actual = target_set_log_z(query, key, zone, zone, graph_ptr)
+
+    _, log_z = readable_graph_attention(query, key, hidden, graph_ptr)
+    torch.testing.assert_close(actual, log_z)
+
+
+@pytest.mark.parametrize(
+    "target_set_log_z", [readable_target_set_log_z, flex_target_set_log_z]
+)
+def test_target_set_never_reaches_into_another_graph(target_set_log_z):
+    query, key, _, graph_ptr = _packed_inputs()
+    zone, parent_zone = _zones(graph_ptr)
+    changed_query, changed_key = query.clone(), key.clone()
+    changed_query[200:] += 50
+    changed_key[200:] += 50
+
+    original = target_set_log_z(query, key, zone, parent_zone, graph_ptr)
+    after = target_set_log_z(changed_query, changed_key, zone, parent_zone, graph_ptr)
+
+    torch.testing.assert_close(after[:200], original[:200], rtol=0, atol=0)
+
+
+@cuda
+def test_flex_target_set_gradients_match_readable_on_cuda():
+    inputs = _packed_inputs("cuda", torch.float32)
+    graph_ptr = inputs[3]
+    zone, parent_zone = _zones(graph_ptr)
+
+    def gradients(target_set_log_z):
+        query, key = (x.clone().requires_grad_() for x in inputs[:2])
+        values = target_set_log_z(query, key, zone, parent_zone, graph_ptr)
+        return torch.autograd.grad(values.sum(), (query, key))
+
+    expected = gradients(readable_target_set_log_z)
+    actual = gradients(flex_target_set_log_z)
+    for a, e in zip(actual, expected, strict=True):
+        torch.testing.assert_close(a, e, rtol=1e-4, atol=1e-5)

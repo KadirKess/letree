@@ -5,8 +5,6 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from letree.generation.targets import CorrectionAction
-
 
 @dataclass
 class CorrectionScores:
@@ -16,21 +14,6 @@ class CorrectionScores:
     depth_mae: float
     exact_depth_fraction: float
     clean_root_lost: bool
-
-
-def tree_correction(
-    parents: NDArray[np.integer],
-    levels: NDArray[np.integer],
-) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
-    """Return corrective parents and actions that decode to this tree's depth."""
-
-    # A level change adds one depth step and an equal-level link adds none.
-    # The root compares with itself, so it gets KEEP_ZERO as the decoder requires.
-    same_level = levels == levels[parents]
-    corrective_actions = np.where(
-        same_level, CorrectionAction.KEEP_ZERO, CorrectionAction.KEEP_ONE
-    ).astype(np.int64)
-    return parents.astype(np.int64), corrective_actions
 
 
 @dataclass

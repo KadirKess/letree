@@ -7,13 +7,15 @@ from letree.model import LetreeModel
 
 
 def _inputs():
-    # A three-node path and a one-node graph, both with self loops
+    # A three-node path and a one-node graph. Message passing reads both edge
+    # directions and self loops, the contraction head each RAG edge once
     features = torch.tensor(
         [[0.1, 0.4, 0.0], [0.8, 0.2, 0.4], [0.3, 0.4, 0.7], [0.5, 1.0, 0.0]],
         dtype=torch.float64,
     )
     edges = torch.tensor([[0, 1, 1, 2, 0, 1, 2, 3], [1, 0, 2, 1, 0, 1, 2, 3]])
-    return features, edges, torch.tensor([0, 3, 4])
+    rag_edges = torch.tensor([[0, 1], [1, 2]])
+    return features, edges, rag_edges, torch.tensor([0, 3, 4])
 
 
 def _model(width=2, recurrent=True, aggregations=("max", "min")):
@@ -78,7 +80,7 @@ def _readout(query_layers, key_layers, hidden, bounds):
     return query, key, torch.cat(log_z), torch.cat(messages)
 
 
-def _reference(model, features, edges, observed_steps, correction_steps):
+def _reference(model, features, edges, rag_edges, observed_steps, correction_steps):
     """Plain-loop forward pass written from the model equations."""
     bounds = [(0, 3), (3, 4)]
     embedding = torch.relu(_linear(model.encoder, features))
@@ -95,7 +97,7 @@ def _reference(model, features, edges, observed_steps, correction_steps):
     if observed_steps == 0:
         hidden = embedding
 
-    corrective, actions = [], []
+    corrective, increments, contractions = [], [], []
     for index in range(correction_steps + 1):
         if index > 0:
             hidden = _update(
@@ -109,11 +111,22 @@ def _reference(model, features, edges, observed_steps, correction_steps):
         readout = _readout(model.corrective_query, model.corrective_key, hidden, bounds)
         step = (hidden, *readout)
         context = torch.relu(
-            _linear(model.action_hidden, torch.cat((hidden, step[-1]), 1))
+            _linear(model.increment_hidden, torch.cat((hidden, step[-1]), 1))
         )
         corrective.append(step)
-        actions.append(_linear(model.action_output, context))
-    return observed, corrective, actions
+        increments.append(_linear(model.increment_output, context)[:, 0])
+        # One row per RAG edge from the sum and absolute difference of its ends
+        pairs = torch.stack(
+            [
+                torch.cat((hidden[u] + hidden[v], (hidden[u] - hidden[v]).abs()))
+                for u, v in rag_edges.T.tolist()
+            ]
+        )
+        contraction_context = torch.relu(_linear(model.contraction_hidden, pairs))
+        contractions.append(
+            _linear(model.contraction_output, contraction_context)[:, 0]
+        )
+    return observed, corrective, increments, contractions
 
 
 def _assert_step(actual, expected):
@@ -129,30 +142,41 @@ def test_forward_and_gradients_match_the_model_equations(
     aggregations, observed_steps, correction_steps
 ):
     model = _model(aggregations=aggregations)
-    features, edges, ptr = _inputs()
+    features, edges, rag_edges, ptr = _inputs()
     features.requires_grad_()
 
-    output = model(features, edges, ptr, observed_steps, correction_steps)
-    observed, corrective, actions = _reference(
-        model, features, edges, observed_steps, correction_steps
+    output = model(features, edges, rag_edges, ptr, observed_steps, correction_steps)
+    observed, corrective, increments, contractions = _reference(
+        model, features, edges, rag_edges, observed_steps, correction_steps
     )
 
     assert len(output.observed) == observed_steps
-    assert len(output.corrective) == len(output.actions) == correction_steps + 1
+    assert len(output.corrective) == correction_steps + 1
+    assert len(output.increment) == len(output.contraction) == correction_steps + 1
     for actual, expected in zip(output.observed, observed, strict=True):
         _assert_step(actual, expected)
     for actual, expected in zip(output.corrective, corrective, strict=True):
         _assert_step(actual, expected)
-    for actual, expected in zip(output.actions, actions, strict=True):
+    for actual, expected in zip(output.increment, increments, strict=True):
+        torch.testing.assert_close(actual, expected)
+    for actual, expected in zip(output.contraction, contractions, strict=True):
         torch.testing.assert_close(actual, expected)
 
-    def loss(log_z, message, logits):
-        return log_z.square().sum() + message.square().sum() + logits.square().sum()
+    def loss(log_z, message, increment, contraction):
+        return (
+            log_z.square().sum()
+            + message.square().sum()
+            + increment.square().sum()
+            + contraction.square().sum()
+        )
 
+    last = output.corrective[-1]
     actual_loss = loss(
-        output.corrective[-1].log_z, output.corrective[-1].message, output.actions[-1]
+        last.log_z, last.message, output.increment[-1], output.contraction[-1]
     )
-    expected_loss = loss(corrective[-1][3], corrective[-1][4], actions[-1])
+    expected_loss = loss(
+        corrective[-1][3], corrective[-1][4], increments[-1], contractions[-1]
+    )
     inputs = (features, *model.parameters())
     actual_gradients = torch.autograd.grad(
         actual_loss, inputs, retain_graph=True, allow_unused=True
@@ -187,7 +211,11 @@ def test_one_step_matches_a_hand_calculation():
     features = torch.tensor([[0.2, 0.3, 0.1], [0.7, 0.1, 0.4]])
 
     step = model(
-        features, torch.tensor([[0, 1, 0, 1], [1, 0, 0, 1]]), torch.tensor([0, 2]), 1
+        features,
+        torch.tensor([[0, 1, 0, 1], [1, 0, 0, 1]]),
+        torch.tensor([[0], [1]]),
+        torch.tensor([0, 2]),
+        1,
     ).observed[0]
 
     # Only the embedding reaches the GRU, and the previous state is zero
@@ -260,11 +288,11 @@ def test_aggregations_are_neighbourhood_extrema_in_input_order(
 def test_edge_reordering_does_not_change_outputs():
     torch.manual_seed(11)
     model = LetreeModel(4).double()
-    features, edges, ptr = _inputs()
+    features, edges, rag_edges, ptr = _inputs()
     permutation = torch.tensor([6, 2, 4, 0, 7, 5, 3, 1])
 
-    original = model(features, edges, ptr, 2, 2)
-    reordered = model(features, edges[:, permutation], ptr, 2, 2)
+    original = model(features, edges, rag_edges, ptr, 2, 2)
+    reordered = model(features, edges[:, permutation], rag_edges, ptr, 2, 2)
 
     for a, b in zip(
         original.observed + original.corrective,
@@ -278,28 +306,29 @@ def test_edge_reordering_does_not_change_outputs():
 def test_graphs_in_a_batch_never_mix(observed_steps):
     torch.manual_seed(59)
     model = LetreeModel(3).double()
-    features, edges, ptr = _inputs()
+    features, edges, rag_edges, ptr = _inputs()
     changed_features = features.clone()
     changed_features[3] += 10
 
-    original = model(features, edges, ptr, observed_steps, 2)
-    changed = model(changed_features, edges, ptr, observed_steps, 2)
+    original = model(features, edges, rag_edges, ptr, observed_steps, 2)
+    changed = model(changed_features, edges, rag_edges, ptr, observed_steps, 2)
 
     for before, after in zip(original.corrective, changed.corrective, strict=True):
         for name in ("hidden", "log_z", "message"):
             torch.testing.assert_close(
                 getattr(before, name)[:3], getattr(after, name)[:3], rtol=0, atol=0
             )
-    for before, after in zip(original.actions, changed.actions, strict=True):
+    for before, after in zip(original.increment, changed.increment, strict=True):
         torch.testing.assert_close(before[:3], after[:3], rtol=0, atol=0)
+    # Both RAG edges lie in the first graph
+    for before, after in zip(original.contraction, changed.contraction, strict=True):
+        torch.testing.assert_close(before, after, rtol=0, atol=0)
 
 
 def test_one_node_graph_is_its_own_parent():
     torch.manual_seed(12)
     model = LetreeModel(5).double()
-    features, edges, ptr = _inputs()
-
-    step = model(features, edges, ptr, 1).observed[0]
+    step = model(*_inputs(), 1).observed[0]
 
     query, key = step.query[3], step.key[3]
     torch.testing.assert_close(step.log_z[3], query @ key / sqrt(5))
@@ -308,10 +337,10 @@ def test_one_node_graph_is_its_own_parent():
 
 def test_zero_observed_steps_start_from_the_embedding_and_skip_observed_layers():
     model = _model()
-    features, edges, ptr = _inputs()
+    features, edges, rag_edges, ptr = _inputs()
 
-    output = model(features, edges, ptr, 0, 1)
-    output.actions[-1].square().sum().backward()
+    output = model(features, edges, rag_edges, ptr, 0, 1)
+    output.increment[-1].square().sum().backward()
 
     torch.testing.assert_close(
         output.corrective[0].hidden, torch.relu(_linear(model.encoder, features))
@@ -322,35 +351,43 @@ def test_zero_observed_steps_start_from_the_embedding_and_skip_observed_layers()
     assert model.encoder.weight.grad is not None
 
 
-def test_later_corrective_steps_read_earlier_messages_but_not_actions():
+def test_later_corrective_steps_read_earlier_messages_but_not_head_outputs():
     torch.manual_seed(47)
     model = LetreeModel(3).double()
-    features, edges, ptr = _inputs()
 
-    output = model(features, edges, ptr, 2, 2)
+    output = model(*_inputs(), 2, 2)
     loss = output.corrective[-1].log_z.square().sum()
     first = output.corrective[0]
-    message, query, action = torch.autograd.grad(
-        loss, (first.message, first.query, output.actions[0]), allow_unused=True
+    message, query, increment, contraction = torch.autograd.grad(
+        loss,
+        (first.message, first.query, output.increment[0], output.contraction[0]),
+        allow_unused=True,
     )
 
     assert torch.count_nonzero(message) and torch.count_nonzero(query)
-    assert action is None
+    assert increment is None and contraction is None
 
 
-@pytest.mark.parametrize("loss_name", ["action", "corrective"])
+HEADS = {
+    "increment": {"increment_hidden", "increment_output"},
+    "contraction": {"contraction_hidden", "contraction_output"},
+}
+
+
+@pytest.mark.parametrize("loss_name", ["increment", "contraction", "corrective"])
 def test_every_used_layer_gets_a_gradient(loss_name):
     torch.manual_seed(29)
     model = LetreeModel(4).double()
-    features, edges, ptr = _inputs()
 
-    output = model(features, edges, ptr, 3, 1)
-    if loss_name == "action":
-        output.actions[-1].square().sum().backward()
-    else:
+    output = model(*_inputs(), 3, 1)
+    if loss_name == "corrective":
         output.corrective[-1].log_z.square().sum().backward()
+    else:
+        getattr(output, loss_name)[-1].square().sum().backward()
 
-    unused = {"action_hidden", "action_output"} if loss_name == "corrective" else set()
+    unused = set().union(
+        *(layers for name, layers in HEADS.items() if name != loss_name)
+    )
     for name, parameter in model.named_parameters():
         if name.split(".")[0] in unused:
             continue
@@ -370,8 +407,10 @@ def test_observed_and_corrective_layers_are_separate():
         "corrective_gru",
         "corrective_query",
         "corrective_key",
-        "action_hidden",
-        "action_output",
+        "increment_hidden",
+        "increment_output",
+        "contraction_hidden",
+        "contraction_output",
     }
     assert "corrective_gru" not in dict(
         LetreeModel(3, correction_recurrent=False).named_children()
@@ -379,19 +418,18 @@ def test_observed_and_corrective_layers_are_separate():
 
 
 def test_invalid_settings_are_rejected():
-    features, edges, ptr = _inputs()
     with pytest.raises(ValueError, match="attention backend"):
         LetreeModel(4, attention="sparse")
     with pytest.raises(ValueError, match="correction_recurrent"):
-        LetreeModel(4, correction_recurrent=False).double()(features, edges, ptr, 1, 1)
+        LetreeModel(4, correction_recurrent=False).double()(*_inputs(), 1, 1)
 
 
 def test_tf32_attention_rounds_every_query_and_key():
     torch.manual_seed(0)
     model = LetreeModel(16, tf32_attention=True)
-    features, edges, graph_ptr = _inputs()
+    features, edges, rag_edges, graph_ptr = _inputs()
 
-    output = model(features.float(), edges, graph_ptr, 2, 1)
+    output = model(features.float(), edges, rag_edges, graph_ptr, 2, 1)
 
     for step in output.observed + output.corrective:
         for values in (step.query, step.key):
@@ -401,12 +439,12 @@ def test_tf32_attention_rounds_every_query_and_key():
 def test_query_and_key_lengths_do_not_grow_with_their_weights():
     torch.manual_seed(0)
     model = LetreeModel(16)
-    features, edges, graph_ptr = _inputs()
+    features, edges, rag_edges, graph_ptr = _inputs()
     with torch.no_grad():
         for name in ("observed_query", "observed_key"):
             getattr(model, name)[0].weight.mul_(1_000)
 
-    step = model(features.float(), edges, graph_ptr, 1).observed[0]
+    step = model(features.float(), edges, rag_edges, graph_ptr, 1).observed[0]
 
     # Untrained normalisation gains are one and biases zero, so every length
     # is the square root of the width
@@ -414,3 +452,16 @@ def test_query_and_key_lengths_do_not_grow_with_their_weights():
         torch.testing.assert_close(
             values.norm(dim=1), torch.full((4,), 4.0), rtol=1e-3, atol=0
         )
+
+
+def test_contraction_logits_ignore_the_order_of_edge_ends():
+    torch.manual_seed(31)
+    model = LetreeModel(4).double()
+    features, edges, rag_edges, ptr = _inputs()
+
+    original = model(features, edges, rag_edges, ptr, 2, 1)
+    flipped = model(features, edges, rag_edges.flip(0), ptr, 2, 1)
+
+    torch.testing.assert_close(
+        original.contraction[-1], flipped.contraction[-1], rtol=0, atol=0
+    )

@@ -16,7 +16,6 @@ from letree.generation.samples import (
 )
 from letree.generation.seeds import GenerationStage, derive_rng
 from letree.generation.targets import (
-    CorrectionAction,
     CorrectionDiagnostics,
     CorrectionTargets,
     derive_correction_targets,
@@ -25,7 +24,6 @@ from letree.generation.targets import (
 __all__ = [
     "NOISE_KIND_NAMES",
     "AdditiveGaussianNoise",
-    "CorrectionAction",
     "CorrectionDiagnostics",
     "CorrectionTargets",
     "GenerationStage",
