@@ -1,6 +1,9 @@
-"""Train a correction model, or its clean-only control.
+"""Train a correction model, its clean-only control, or one stage of staged training.
 
 uv run python scripts/train.py DATASET RUN_DIRECTORY --max-epochs N
+uv run python scripts/train.py DATASET OBSERVED_RUN --max-epochs N --stage observed
+uv run python scripts/train.py DATASET RUN_DIRECTORY --max-epochs N \
+    --stage frozen --observed-run OBSERVED_RUN
 """
 
 import argparse
@@ -37,6 +40,10 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--early-stopping-patience", type=int, default=10)
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--stage", choices=("joint", "observed", "frozen"), default="joint"
+    )
+    parser.add_argument("--observed-run")
     return parser.parse_args()
 
 
@@ -59,6 +66,8 @@ def main() -> None:
         batch_size=arguments.batch_size,
         num_workers=arguments.workers,
         seed=arguments.seed,
+        stage=arguments.stage,
+        observed_run=arguments.observed_run,
     )
     best = fit(settings, arguments.run_directory, resume=arguments.resume)
     print(f"best epoch {best['epoch']}")

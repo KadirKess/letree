@@ -17,13 +17,22 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 
 from letree.data.graphs import ObservationDataset, make_loader
-from letree.experiments.losses import correction_losses
+from letree.experiments.losses import correction_losses, observed_losses
 from letree.experiments.metrics import batch_image_metrics, summarize_image_metrics
 from letree.model import LetreeModel
 
 SELECTION_METRIC = "selection"
-# Checkpoints are chosen on the corrective losses only, lower is better
-SELECTION_PARTS = ("loss/set_pointer", "loss/contraction", "loss/increment")
+# Lower is better. The observed stage selects on its only loss, the other
+# stages on the corrective losses
+SELECTION_PARTS = {
+    "joint": ("loss/set_pointer", "loss/contraction", "loss/increment"),
+    "observed": ("loss/observed_parent",),
+    "frozen": ("loss/set_pointer", "loss/contraction", "loss/increment"),
+}
+# The frozen stage keeps what the observed stage trained
+FROZEN_MODULES = ("encoder", "observed_gru", "observed_query", "observed_key")
+# An observed run must match on these for its weights to mean the same thing
+OBSERVED_FIELDS = ("width", "aggregations", "observed_steps", "precision")
 
 # Colab redraws subprocess output slowly, so refresh the bars at most every few seconds
 PROGRESS_SECONDS = 5
@@ -52,6 +61,9 @@ class RunSettings:
     batch_size: int = 16
     num_workers: int = 0
     seed: int = 0
+    stage: str = "joint"
+    # The frozen stage starts from the best checkpoint of this observed run
+    observed_run: str | None = None
 
 
 def build_model(settings: RunSettings) -> LetreeModel:
@@ -76,6 +88,36 @@ def build_model(settings: RunSettings) -> LetreeModel:
     return model
 
 
+def stage_correction_steps(settings: RunSettings) -> int | None:
+    # The observed stage never runs the corrective loop
+    return None if settings.stage == "observed" else settings.correction_steps
+
+
+def stage_losses(output, data, settings: RunSettings) -> dict[str, torch.Tensor]:
+    if settings.stage == "observed":
+        return observed_losses(output, data)
+    return correction_losses(output, data, settings.attention)
+
+
+def load_frozen_observed(model: LetreeModel, settings: RunSettings, device) -> None:
+    """Load the observed run's best weights and freeze its observed part."""
+    observed_run = Path(settings.observed_run)
+    recorded = json.loads((observed_run / "settings.json").read_text())["settings"]
+    if recorded["stage"] != "observed":
+        raise ValueError(f"{observed_run} is not an observed stage run.")
+    for field in OBSERVED_FIELDS:
+        mine, theirs = getattr(settings, field), recorded[field]
+        if (list(mine) if isinstance(mine, tuple) else mine) != theirs:
+            raise ValueError(f"{field} is {mine!r} here and {theirs!r} there.")
+
+    # The corrective modules come along at the initialisation the observed run
+    # never trained
+    state = torch.load(observed_run / "best.pt", map_location=device)
+    model.load_state_dict(state["model"])
+    for name in FROZEN_MODULES:
+        getattr(model, name).requires_grad_(False)
+
+
 def select_device() -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
@@ -98,9 +140,9 @@ def train_epoch(model, loader, optimizer, settings, device) -> dict[str, float]:
             data.rag_edge_index,
             data.ptr,
             settings.observed_steps,
-            settings.correction_steps,
+            stage_correction_steps(settings),
         )
-        losses = correction_losses(output, data, settings.attention)
+        losses = stage_losses(output, data, settings)
 
         optimizer.zero_grad()
         sum(losses.values()).backward()
@@ -136,9 +178,9 @@ def evaluate(model, loader, settings, device) -> dict[str, float]:
             data.rag_edge_index,
             data.ptr,
             settings.observed_steps,
-            settings.correction_steps,
+            stage_correction_steps(settings),
         )
-        for name, value in correction_losses(output, data, settings.attention).items():
+        for name, value in stage_losses(output, data, settings).items():
             loss_totals[name] += value.item() * data.num_graphs
         graph_count += data.num_graphs
 
@@ -156,7 +198,9 @@ def evaluate(model, loader, settings, device) -> dict[str, float]:
     summary = summarize_image_metrics(per_image)
     for name, total in loss_totals.items():
         summary[f"loss/{name}"] = total / graph_count
-    summary[SELECTION_METRIC] = sum(summary[name] for name in SELECTION_PARTS)
+    summary[SELECTION_METRIC] = sum(
+        summary[name] for name in SELECTION_PARTS[settings.stage]
+    )
     for name, length in largest.items():
         summary[f"max_length/{name}"] = length
     return summary
@@ -184,39 +228,48 @@ def epoch_report(history: list[dict], stale: int, patience: int) -> str:
     def row(label: str, values: list[float]) -> str:
         return f"  {label:<24}" + "".join(f"{value:>12.4f}" for value in values)
 
-    validation_losses = [validation[f"loss/{n}"] for n in LOSS_NAMES]
+    # An observed stage run has only the observed loss and accuracy
+    losses = [(n, c) for n, c in zip(LOSS_NAMES, LOSS_COLUMNS) if n in train]
+    accuracies = [
+        (n, c)
+        for n, c in zip(ACCURACY_NAMES, ACCURACY_COLUMNS)
+        if any(f"{g}/{n}/image_mean" in validation for g in ("all", "clean", "noisy"))
+    ]
+    validation_losses = [validation[f"loss/{n}"] for n, _ in losses]
     lines = [
         f"epoch {entry['epoch']}  lr {entry['learning_rate']:.1e}  "
         f"{entry['seconds']:.0f}s",
         f"  {'loss':<24}"
-        + "".join(f"{name:>12}" for name in LOSS_COLUMNS)
+        + "".join(f"{column:>12}" for _, column in losses)
         + f"{'total':>12}",
         row(
-            "train (epoch mean)", [train[n] for n in LOSS_NAMES] + [sum(train.values())]
+            "train (epoch mean)",
+            [train[n] for n, _ in losses] + [sum(train.values())],
         ),
         row("val", validation_losses + [sum(validation_losses)]),
         f"  {'accuracy, image mean':<24}"
-        + "".join(f"{name:>12}" for name in ACCURACY_COLUMNS),
+        + "".join(f"{column:>12}" for _, column in accuracies),
     ]
     for group in ("clean", "noisy"):
         if f"{group}/images" in validation:
             lines.append(
                 row(
                     f"val {group}",
-                    [validation[f"{group}/{n}/image_mean"] for n in ACCURACY_NAMES],
+                    [validation[f"{group}/{n}/image_mean"] for n, _ in accuracies],
                 )
             )
     lines.append(
         f"  {'max length, val':<24}query {validation['max_length/query']:.1f}  "
         f"key {validation['max_length/key']:.1f}"
     )
+    selected = "corrective" if "set_pointer" in train else "observed"
     best_text = (
         "none yet"
         if best is None
         else f"{best['validation'][SELECTION_METRIC]:.4f} at epoch {best['epoch']}"
     )
     lines.append(
-        f"  selection (val corrective loss) {validation[SELECTION_METRIC]:.4f}  "
+        f"  selection (val {selected} loss) {validation[SELECTION_METRIC]:.4f}  "
         f"best {best_text}  stale {stale}/{patience}"
     )
     return "\n".join(lines)
@@ -250,6 +303,11 @@ def git_revision() -> str | None:
 
 def fit(settings: RunSettings, run_directory: str | Path, resume: bool = False) -> dict:
 
+    if settings.stage not in SELECTION_PARTS:
+        raise ValueError(f"Unknown stage: {settings.stage!r}.")
+    if (settings.stage == "frozen") != (settings.observed_run is not None):
+        raise ValueError("Only the frozen stage starts from an observed run.")
+
     run_directory = Path(run_directory)
     run_directory.mkdir(parents=True, exist_ok=True)
     last_path = run_directory / "last.pt"
@@ -275,8 +333,10 @@ def fit(settings: RunSettings, run_directory: str | Path, resume: bool = False) 
     validation_loader = loader("val", shuffle=False)
 
     model = build_model(settings).to(device)
+    if settings.stage == "frozen":
+        load_frozen_observed(model, settings, device)
     optimizer = AdamW(
-        model.parameters(),
+        [parameter for parameter in model.parameters() if parameter.requires_grad],
         lr=settings.learning_rate,
         weight_decay=settings.weight_decay,
     )
@@ -302,6 +362,7 @@ def fit(settings: RunSettings, run_directory: str | Path, resume: bool = False) 
             {
                 "settings": asdict(settings),
                 "selection_metric": SELECTION_METRIC,
+                "selection_parts": SELECTION_PARTS[settings.stage],
                 "git": git_revision(),
                 "torch": torch.__version__,
                 "device": str(device),

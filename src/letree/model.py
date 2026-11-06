@@ -79,9 +79,9 @@ class LetreeModel(nn.Module):
         rag_edge_index: Tensor,
         graph_ptr: Tensor,
         observed_steps: int,
-        correction_steps: int = 0,
+        correction_steps: int | None = 0,
     ) -> Output:
-        if correction_steps > 0 and self.corrective_gru is None:
+        if correction_steps and self.corrective_gru is None:
             raise ValueError("Corrective steps need correction_recurrent.")
 
         embedding = torch.relu(self.encoder(x))
@@ -113,6 +113,9 @@ class LetreeModel(nn.Module):
             observed.append(step)
         if observed_steps == 0:
             hidden = embedding
+        # None skips the corrective loop, even its first readout
+        if correction_steps is None:
+            return Output(observed, [], [], [])
 
         # Corrective loop. The first readout comes before any corrective update,
         # and increments read the corrective message, not the observed one.

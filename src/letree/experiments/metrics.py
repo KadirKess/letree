@@ -39,19 +39,14 @@ def graph_local_argmax(
 
 
 def batch_image_metrics(output: Output, data: Batch) -> dict[str, Tensor]:
-    """One value per image for each quantity, plus node, edge and tie counts."""
-    observed, corrective = output.observed[-1], output.corrective[-1]
+    """One value per image for each quantity, plus node, edge and tie counts.
+
+    A model run without its corrective loop gets only the observed quantities.
+    """
+    observed = output.observed[-1]
     observed_predictions, observed_tied = graph_local_argmax(
         observed.query, observed.key, data.ptr
     )
-    corrective_predictions, corrective_tied = graph_local_argmax(
-        corrective.query, corrective.key, data.ptr
-    )
-    # Predictions are local to their graph, so shift them to rows of the batch
-    pointed = corrective_predictions + data.ptr[data.batch]
-    pointer_correct = data.zone[pointed] == data.parent_zone
-    increment_correct = (output.increment[-1] > 0) == data.increment.bool()
-    edge_correct = (output.contraction[-1] > 0) == contraction_targets(data).bool()
     edge_image = data.batch[data.rag_edge_index[0]]
 
     def per_image(correct: Tensor, image: Tensor = data.batch) -> Tensor:
@@ -60,19 +55,33 @@ def batch_image_metrics(output: Output, data: Batch) -> dict[str, Tensor]:
     def count(mask: Tensor) -> Tensor:
         return scatter(mask.long(), data.batch, reduce="sum", dim_size=data.num_graphs)
 
-    return {
+    metrics = {
         "observed_parent_accuracy": per_image(
             observed_predictions == data.observed_parents
         ),
+        "observed_ties": count(observed_tied),
+        "node_count": data.ptr.diff(),
+        "edge_count": torch.bincount(edge_image, minlength=data.num_graphs),
+    }
+    if not output.corrective:
+        return metrics
+
+    corrective = output.corrective[-1]
+    corrective_predictions, corrective_tied = graph_local_argmax(
+        corrective.query, corrective.key, data.ptr
+    )
+    # Predictions are local to their graph, so shift them to rows of the batch
+    pointed = corrective_predictions + data.ptr[data.batch]
+    pointer_correct = data.zone[pointed] == data.parent_zone
+    increment_correct = (output.increment[-1] > 0) == data.increment.bool()
+    edge_correct = (output.contraction[-1] > 0) == contraction_targets(data).bool()
+    return metrics | {
         "set_pointer_accuracy": per_image(pointer_correct),
         "increment_accuracy": per_image(increment_correct),
         # A node decodes correctly only when its pointer and increment are right
         "joint_accuracy": per_image(pointer_correct & increment_correct),
         "edge_accuracy": per_image(edge_correct, edge_image),
-        "observed_ties": count(observed_tied),
         "corrective_ties": count(corrective_tied),
-        "node_count": data.ptr.diff(),
-        "edge_count": torch.bincount(edge_image, minlength=data.num_graphs),
     }
 
 
@@ -108,6 +117,8 @@ def summarize_image_metrics(per_image: dict[str, list]) -> dict[str, float]:
         if not mask.any():
             continue
         for name in IMAGE_QUANTITIES:
+            if name not in values:
+                continue
             weights = counts["edge" if name in EDGE_QUANTITIES else "node"][mask]
             # Images without edges have no edge accuracy, so they are left out
             present = weights > 0
@@ -121,5 +132,8 @@ def summarize_image_metrics(per_image: dict[str, list]) -> dict[str, float]:
         summary[f"{group}/nodes"] = int(counts["node"][mask].sum())
         summary[f"{group}/edges"] = int(counts["edge"][mask].sum())
         summary[f"{group}/observed_ties"] = int(values["observed_ties"][mask].sum())
-        summary[f"{group}/corrective_ties"] = int(values["corrective_ties"][mask].sum())
+        if "corrective_ties" in values:
+            summary[f"{group}/corrective_ties"] = int(
+                values["corrective_ties"][mask].sum()
+            )
     return summary

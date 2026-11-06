@@ -50,11 +50,16 @@ def image_mean(values: Tensor, data: Batch, image: Tensor | None = None) -> Tens
     return per_image[present].mean()
 
 
+def observed_losses(output: Output, data: Batch) -> dict[str, Tensor]:
+    """Observed loss at the last observed step."""
+    observed = parent_cross_entropy(output.observed[-1], data.observed_parents, data)
+    return {"observed_parent": image_mean(observed, data)}
+
+
 def correction_losses(
     output: Output, data: Batch, attention: str = "dense"
 ) -> dict[str, Tensor]:
     """Observed loss at the last observed step, the rest at the last corrective one."""
-    observed = parent_cross_entropy(output.observed[-1], data.observed_parents, data)
     set_pointer = set_pointer_cross_entropy(output.corrective[-1], data, attention)
     contraction_logits, increment_logits = output.contraction[-1], output.increment[-1]
     contraction = F.binary_cross_entropy_with_logits(
@@ -66,8 +71,7 @@ def correction_losses(
         increment_logits, data.increment.to(increment_logits.dtype), reduction="none"
     )
     edge_image = data.batch[data.rag_edge_index[0]]
-    return {
-        "observed_parent": image_mean(observed, data),
+    return observed_losses(output, data) | {
         "set_pointer": image_mean(set_pointer, data),
         "contraction": image_mean(contraction, data, edge_image),
         "increment": image_mean(increment, data),
