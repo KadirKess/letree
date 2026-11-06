@@ -8,7 +8,7 @@ import os
 
 from letree.component_tree.types import ComponentTreeKind
 from letree.data.families import generate_dataset
-from letree.generation.noise import NOISE_KIND_NAMES
+from letree.generation.noise import NOISE_KIND_NAMES, AdditiveGaussianNoise
 
 NOISE_TYPES = {name: noise_type for noise_type, name in NOISE_KIND_NAMES.items()}
 
@@ -22,11 +22,22 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--noisy", type=int, default=2)
     parser.add_argument(
+        "--gaussian-std",
+        type=float,
+        default=AdditiveGaussianNoise.standard_deviation,
+    )
+    parser.add_argument(
         "--tree", choices=[kind.value for kind in ComponentTreeKind], default="max_tree"
     )
     parser.add_argument("--base-seed", type=int, default=42)
     parser.add_argument("--workers", type=int, default=os.cpu_count() or 1)
     return parser.parse_args()
+
+
+def make_noise(name: str, arguments: argparse.Namespace):
+    if name == "additive_gaussian":
+        return AdditiveGaussianNoise(standard_deviation=arguments.gaussian_std)
+    return NOISE_TYPES[name]()
 
 
 def main() -> None:
@@ -40,7 +51,7 @@ def main() -> None:
         arguments.source,
         arguments.base_seed,
         ComponentTreeKind(arguments.tree),
-        tuple(NOISE_TYPES[name]() for name in arguments.noise),
+        tuple(make_noise(name, arguments) for name in arguments.noise),
         noisy_counts,
         arguments.workers,
     )
