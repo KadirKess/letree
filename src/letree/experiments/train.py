@@ -64,6 +64,8 @@ class RunSettings:
     stage: str = "joint"
     # The frozen stage starts from the best checkpoint of this observed run
     observed_run: str | None = None
+    zone_pointer: bool = False
+    separating_weight: float = 1.0
 
 
 def build_model(settings: RunSettings) -> LetreeModel:
@@ -96,7 +98,20 @@ def stage_correction_steps(settings: RunSettings) -> int | None:
 def stage_losses(output, data, settings: RunSettings) -> dict[str, torch.Tensor]:
     if settings.stage == "observed":
         return observed_losses(output, data)
-    return correction_losses(output, data, settings.attention)
+    return correction_losses(
+        output,
+        data,
+        settings.attention,
+        settings.zone_pointer,
+        settings.separating_weight,
+    )
+
+
+def selection_parts(settings: RunSettings) -> tuple[str, ...]:
+    parts = SELECTION_PARTS[settings.stage]
+    if settings.zone_pointer and settings.stage != "observed":
+        parts += ("loss/zone_pointer",)
+    return parts
 
 
 def load_frozen_observed(model: LetreeModel, settings: RunSettings, device) -> None:
@@ -198,16 +213,20 @@ def evaluate(model, loader, settings, device) -> dict[str, float]:
     summary = summarize_image_metrics(per_image)
     for name, total in loss_totals.items():
         summary[f"loss/{name}"] = total / graph_count
-    summary[SELECTION_METRIC] = sum(
-        summary[name] for name in SELECTION_PARTS[settings.stage]
-    )
+    summary[SELECTION_METRIC] = sum(summary[name] for name in selection_parts(settings))
     for name, length in largest.items():
         summary[f"max_length/{name}"] = length
     return summary
 
 
-LOSS_NAMES = ("observed_parent", "set_pointer", "contraction", "increment")
-LOSS_COLUMNS = ("observed", "pointer", "contraction", "increment")
+LOSS_NAMES = (
+    "observed_parent",
+    "set_pointer",
+    "zone_pointer",
+    "contraction",
+    "increment",
+)
+LOSS_COLUMNS = ("observed", "pointer", "zone", "contraction", "increment")
 ACCURACY_NAMES = (
     "observed_parent_accuracy",
     "set_pointer_accuracy",
@@ -362,7 +381,7 @@ def fit(settings: RunSettings, run_directory: str | Path, resume: bool = False) 
             {
                 "settings": asdict(settings),
                 "selection_metric": SELECTION_METRIC,
-                "selection_parts": SELECTION_PARTS[settings.stage],
+                "selection_parts": selection_parts(settings),
                 "git": git_revision(),
                 "torch": torch.__version__,
                 "device": str(device),

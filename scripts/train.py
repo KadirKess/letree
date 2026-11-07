@@ -44,6 +44,8 @@ def parse_arguments() -> argparse.Namespace:
         "--stage", choices=("joint", "observed", "frozen"), default="joint"
     )
     parser.add_argument("--observed-run")
+    parser.add_argument("--zone-pointer", action="store_true")
+    parser.add_argument("--separating-weight", type=float, default=1.0)
     return parser.parse_args()
 
 
@@ -68,6 +70,8 @@ def main() -> None:
         seed=arguments.seed,
         stage=arguments.stage,
         observed_run=arguments.observed_run,
+        zone_pointer=arguments.zone_pointer,
+        separating_weight=arguments.separating_weight,
     )
     best = fit(settings, arguments.run_directory, resume=arguments.resume)
     print(f"best epoch {best['epoch']}")

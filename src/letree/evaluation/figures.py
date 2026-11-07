@@ -5,7 +5,13 @@ import numpy as np
 from matplotlib.figure import Figure
 from numpy.typing import NDArray
 
-LOSS_NAMES = ("observed_parent", "set_pointer", "contraction", "increment")
+LOSS_NAMES = (
+    "observed_parent",
+    "set_pointer",
+    "zone_pointer",
+    "contraction",
+    "increment",
+)
 DECODED_SOURCES = ("observed", "model_soft", "model_hard", "oracle")
 MODEL_SOURCES = ("model_soft", "model_hard")
 
@@ -105,7 +111,10 @@ def training_figure(history: list[dict]) -> Figure:
     figure, axes = plt.subplots(2, 2, figsize=(13, 8))
 
     axis = axes[0, 0]
-    for name, colour in zip(LOSS_NAMES, ("C0", "C1", "C2", "C3")):
+    # Older runs and the observed stage lack some losses
+    colours = dict(zip(LOSS_NAMES, ("C0", "C1", "C4", "C2", "C3")))
+    for name in (name for name in LOSS_NAMES if name in history[0]["train"]):
+        colour = colours[name]
         axis.plot(epochs, [entry["train"][name] for entry in history], colour)
         axis.plot(
             epochs,

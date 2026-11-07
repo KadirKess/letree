@@ -13,6 +13,7 @@ from letree.experiments.losses import (
     image_mean,
     parent_cross_entropy,
     set_pointer_cross_entropy,
+    zone_pointer_cross_entropy,
 )
 from letree.generation import SaltAndPepperNoise, SquareImageConfig
 from letree.model import LetreeModel, Step
@@ -115,11 +116,12 @@ def _scores(query, key, start, stop):
     return query[start:stop] @ key[start:stop].T / sqrt(query.shape[1])
 
 
-def _dense_losses(output, batch):
+def _dense_losses(output, batch, separating_weight=1.0):
     """Each loss image by image from dense scores and plain loops."""
     observed, corrective = output.observed[-1], output.corrective[-1]
     expected = {name: [] for name in ("observed_parent", "set_pointer", "contraction")}
     expected["increment"] = []
+    expected["zone_pointer"] = []
     source, destination = batch.rag_edge_index
     bounds = batch.ptr.tolist()
     for image, (start, stop) in enumerate(zip(bounds[:-1], bounds[1:])):
@@ -134,14 +136,21 @@ def _dense_losses(output, batch):
         )
         zone, parent_zone = batch.zone[start:stop], batch.parent_zone[start:stop]
         in_target_set = zone[None, :] == parent_zone[:, None]
-        expected["set_pointer"].append(
-            -torch.log((probabilities * in_target_set).sum(1)).mean()
+        mass = (probabilities * in_target_set).sum(1)
+        expected["set_pointer"].append(-torch.log(mass).mean())
+        expected["zone_pointer"].append(
+            torch.stack(
+                [-torch.log(mass[zone == z].mean()) for z in zone.unique()]
+            ).mean()
         )
         edges = (batch.batch[source] == image).nonzero()[:, 0]
+        contracts = batch.zone[source[edges]] == batch.zone[destination[edges]]
+        weights = [1.0 if c else separating_weight for c in contracts.tolist()]
         expected["contraction"].append(
             F.binary_cross_entropy_with_logits(
                 output.contraction[-1][edges],
-                (batch.zone[source[edges]] == batch.zone[destination[edges]]).double(),
+                contracts.double(),
+                weight=torch.tensor(weights, dtype=torch.double),
             )
         )
         expected["increment"].append(
@@ -153,7 +162,8 @@ def _dense_losses(output, batch):
     return {name: torch.stack(values).mean() for name, values in expected.items()}
 
 
-def test_losses_match_dense_computations_per_image(graphs) -> None:
+@pytest.mark.parametrize("separating_weight", [1.0, 5.0])
+def test_losses_match_dense_computations_per_image(graphs, separating_weight) -> None:
     torch.manual_seed(0)
     model = LetreeModel(8).double()
     output, batch = _forward(model, graphs, range(len(graphs)))
@@ -161,8 +171,11 @@ def test_losses_match_dense_computations_per_image(graphs) -> None:
     assert contraction_targets(batch).sum() > 0
     assert batch.increment.sum() > 0
 
-    losses = correction_losses(output, batch)
-    for name, reference in _dense_losses(output, batch).items():
+    losses = correction_losses(
+        output, batch, zone_pointer=True, separating_weight=separating_weight
+    )
+    assert losses.keys() == _dense_losses(output, batch).keys()
+    for name, reference in _dense_losses(output, batch, separating_weight).items():
         actual = losses[name]
         assert actual.item() == pytest.approx(reference.item(), rel=1e-12)
         actual_gradients = torch.autograd.grad(
@@ -181,8 +194,8 @@ def test_flex_losses_match_dense_losses(graphs) -> None:
     model = LetreeModel(8).double()
     with torch.no_grad():
         output, batch = _forward(model, graphs, range(len(graphs)))
-        dense = correction_losses(output, batch, "dense")
-        flex = correction_losses(output, batch, "flex")
+        dense = correction_losses(output, batch, "dense", True, 5.0)
+        flex = correction_losses(output, batch, "flex", True, 5.0)
 
     for name in dense:
         torch.testing.assert_close(flex[name], dense[name])
@@ -193,10 +206,78 @@ def test_losses_do_not_depend_on_graph_order(graphs) -> None:
     model = LetreeModel(8).double()
 
     forward = sum(
-        correction_losses(*_forward(model, graphs, [0, 1, 2, 3, 4, 5])).values()
+        correction_losses(
+            *_forward(model, graphs, [0, 1, 2, 3, 4, 5]), "dense", True
+        ).values()
     )
     shuffled = sum(
-        correction_losses(*_forward(model, graphs, [5, 3, 1, 0, 2, 4])).values()
+        correction_losses(
+            *_forward(model, graphs, [5, 3, 1, 0, 2, 4]), "dense", True
+        ).values()
     )
 
     assert forward.item() == pytest.approx(shuffled.item(), rel=1e-12)
+
+
+def test_zone_pointer_is_minus_log_mean_mass_per_zone() -> None:
+    # Zones 0, 2 and 4 hold nodes with parent-zone masses 0.5 and 0.1, 0.8 and
+    # 0.2, and 0.3
+    mass = torch.tensor([0.5, 0.1, 0.8, 0.2, 0.3], dtype=torch.double)
+
+    values, image = zone_pointer_cross_entropy(-torch.log(mass), _worked_example())
+
+    expected = [-log(0.3), -log(0.5), -log(0.3)]
+    assert values.tolist() == pytest.approx(expected, rel=1e-12)
+    assert image.tolist() == [0, 0, 0]
+
+
+def test_zone_pointer_is_below_the_node_mean_of_a_zone() -> None:
+    # Minus the log of a mean is at most the mean of minus the logs
+    mass = torch.tensor([0.5, 0.1, 0.8, 0.2, 0.3], dtype=torch.double)
+
+    values, _ = zone_pointer_cross_entropy(-torch.log(mass), _worked_example())
+
+    assert values[0].item() < (-log(0.5) - log(0.1)) / 2
+
+
+def test_zone_pointer_equals_the_node_loss_on_single_node_zones() -> None:
+    set_pointer = torch.tensor([0.7, 1.3, 2.0])
+    data = SimpleNamespace(batch=torch.zeros(3, dtype=torch.long), zone=torch.arange(3))
+
+    values, _ = zone_pointer_cross_entropy(set_pointer, data)
+
+    torch.testing.assert_close(values, set_pointer)
+
+
+def test_zone_pointer_keeps_equal_zone_ids_of_two_images_apart() -> None:
+    # Both images name their only zone 0
+    mass = torch.tensor([0.5, 0.1, 0.8, 0.2], dtype=torch.double)
+    data = SimpleNamespace(
+        batch=torch.tensor([0, 0, 1, 1]), zone=torch.zeros(4, dtype=torch.long)
+    )
+
+    values, image = zone_pointer_cross_entropy(-torch.log(mass), data)
+
+    assert values.tolist() == pytest.approx([-log(0.3), -log(0.5)], rel=1e-12)
+    assert image.tolist() == [0, 1]
+
+
+def test_zone_pointer_stays_finite_for_tiny_masses() -> None:
+    # exp(-1000) underflows, so a direct mean of the masses would give inf
+    set_pointer = torch.tensor([1000.0, 1001.0], dtype=torch.double)
+    data = SimpleNamespace(
+        batch=torch.zeros(2, dtype=torch.long), zone=torch.zeros(2, dtype=torch.long)
+    )
+
+    values, _ = zone_pointer_cross_entropy(set_pointer, data)
+
+    assert values.item() == pytest.approx(1000 - log((1 + exp(-1)) / 2), rel=1e-12)
+
+
+def test_zone_pointer_is_left_out_by_default(graphs) -> None:
+    torch.manual_seed(0)
+    model = LetreeModel(8).double()
+
+    losses = correction_losses(*_forward(model, graphs, range(len(graphs))))
+
+    assert "zone_pointer" not in losses

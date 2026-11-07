@@ -14,6 +14,7 @@ from letree.experiments.train import (
     epoch_report,
     evaluate,
     fit,
+    selection_parts,
 )
 from letree.generation import (
     NOISE_KIND_NAMES,
@@ -232,3 +233,16 @@ def test_resumed_run_matches_an_uninterrupted_one(
     split = torch.load(tmp_path / "split" / "last.pt")["model"]
     for name, value in whole.items():
         torch.testing.assert_close(split[name], value, rtol=0, atol=0, msg=name)
+
+
+def test_selection_adds_the_zone_pointer_loss_only_when_trained() -> None:
+    settings = RunSettings(dataset_root="", max_epochs=1)
+    base = ("loss/set_pointer", "loss/contraction", "loss/increment")
+
+    assert selection_parts(settings) == base
+    assert selection_parts(replace(settings, zone_pointer=True)) == (
+        *base,
+        "loss/zone_pointer",
+    )
+    observed = replace(settings, zone_pointer=True, stage="observed")
+    assert selection_parts(observed) == ("loss/observed_parent",)
