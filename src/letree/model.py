@@ -39,6 +39,43 @@ def normalized_projection(width: int) -> nn.Sequential:
     return nn.Sequential(nn.Linear(width, width), nn.LayerNorm(width))
 
 
+class AppearanceBackbone(nn.Module):
+    """Residual CNN that gives every pixel a feature of its 21 by 21 window."""
+
+    def __init__(self, channels: int = 32) -> None:
+        super().__init__()
+        # Ten 3 by 3 convolutions, each widening the window by one pixel per
+        # side. Zero padding keeps the image size, so pixels near the border
+        # read zeros beyond it
+        self.lift = nn.Conv2d(1, channels, 3, padding=1)
+        self.blocks = nn.ModuleList(
+            nn.Sequential(
+                nn.Conv2d(channels, channels, 3, padding=1),
+                nn.ReLU(),
+                nn.Conv2d(channels, channels, 3, padding=1),
+            )
+            for _ in range(4)
+        )
+        self.output = nn.Conv2d(channels, channels, 3, padding=1)
+
+    def forward(self, image: Tensor) -> Tensor:
+        features = torch.relu(self.lift(image.unsqueeze(1)))
+        # Each block adds to its input, so the gradient has a direct path
+        # through all ten layers without normalisation
+        for block in self.blocks:
+            features = features + block(features)
+        # No ReLU on the output, so the features can take either sign
+        return self.output(torch.relu(features))
+
+
+def pool_zones(features: Tensor, label_map: Tensor, node_count: int) -> Tensor:
+    """Mean backbone feature over the pixels of each flat zone."""
+    # Both are flattened image by image and row by row, so pixel p of the batch
+    # sits at the same position in each
+    pixels = features.permute(0, 2, 3, 1).reshape(-1, features.shape[1])
+    return scatter(pixels, label_map, dim=0, dim_size=node_count, reduce="mean")
+
+
 class LetreeModel(nn.Module):
     def __init__(
         self,
@@ -47,6 +84,7 @@ class LetreeModel(nn.Module):
         aggregations: tuple[str, ...] = ("max", "min"),
         attention: str = "dense",
         tf32_attention: bool = False,
+        backbone: bool = False,
     ) -> None:
         super().__init__()
         if attention not in ("dense", "flex"):
@@ -56,7 +94,11 @@ class LetreeModel(nn.Module):
         self.tf32_attention = tf32_attention
 
         gru_input = (2 + len(aggregations)) * width
-        self.encoder = nn.Linear(FEATURE_COUNT, width)
+        # The backbone features join level, area and anchor before the encoder,
+        # so they reach every update through the embedding
+        self.backbone = AppearanceBackbone() if backbone else None
+        appearance = self.backbone.output.out_channels if backbone else 0
+        self.encoder = nn.Linear(FEATURE_COUNT + appearance, width)
         self.observed_gru = nn.GRUCell(gru_input, width)
         # Normalised queries and keys keep the attention scores bounded. Without
         # them the scores grew until training diverged
@@ -80,10 +122,17 @@ class LetreeModel(nn.Module):
         graph_ptr: Tensor,
         observed_steps: int,
         correction_steps: int | None = 0,
+        image: Tensor | None = None,
+        label_map: Tensor | None = None,
     ) -> Output:
         if correction_steps and self.corrective_gru is None:
             raise ValueError("Corrective steps need correction_recurrent.")
+        if (self.backbone is None) != (image is None):
+            raise ValueError("Pass an image exactly when the model has a backbone.")
 
+        if self.backbone is not None:
+            features = pool_zones(self.backbone(image), label_map, x.shape[0])
+            x = torch.cat((x, features), dim=1)
         embedding = torch.relu(self.encoder(x))
         block_mask = (
             same_graph_block_mask(graph_ptr) if self.attention == "flex" else None

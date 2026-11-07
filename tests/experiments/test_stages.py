@@ -190,3 +190,17 @@ def test_epoch_report_of_an_observed_stage_has_only_observed_columns(
     assert "pointer" not in report
     assert "contraction" not in report
     assert "selection (val observed loss)" in report
+
+
+def test_frozen_stage_loads_an_observed_run_recorded_before_the_backbone_setting(
+    observed_run, dataset_root, tmp_path
+) -> None:
+    path = observed_run / "settings.json"
+    recorded = json.loads(path.read_text())
+    del recorded["settings"]["backbone"]
+    path.write_text(json.dumps(recorded))
+
+    settings = _settings(
+        dataset_root, 1, stage="frozen", observed_run=str(observed_run)
+    )
+    fit(settings, tmp_path / "frozen")

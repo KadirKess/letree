@@ -17,6 +17,7 @@ from letree.experiments.train import (
     PROGRESS_SECONDS,
     RunSettings,
     build_model,
+    run_model,
     select_device,
     write_json,
 )
@@ -47,14 +48,7 @@ def predict(
     model: LetreeModel, settings: RunSettings, data: Batch
 ) -> list[GraphPrediction]:
     """Outputs of the last corrective step for every graph of the batch."""
-    output = model(
-        data.x,
-        data.edge_index,
-        data.rag_edge_index,
-        data.ptr,
-        settings.observed_steps,
-        settings.correction_steps,
-    )
+    output = run_model(model, data, settings, settings.correction_steps)
     step = output.corrective[-1]
     pointers, tied = graph_local_argmax(step.query, step.key, data.ptr)
     increment_probabilities = torch.sigmoid(output.increment[-1])

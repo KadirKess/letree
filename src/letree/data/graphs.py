@@ -23,6 +23,9 @@ class Graph(Data):
         # must not shift them. The RAG edges are node ids and are shifted.
         if key in {"observed_parents", "zone", "parent_zone"}:
             return 0
+        # The label map holds node ids, so it shifts like the edges
+        if key == "label_map":
+            return self.num_nodes
         return super().__inc__(key, value, *args, **kwargs)
 
 
@@ -54,6 +57,10 @@ def to_graph(tree_image: TreeImage, targets: CorrectionTargets) -> Graph:
         zone=torch.as_tensor(targets.zone, dtype=torch.int64),
         parent_zone=torch.as_tensor(targets.parent_zone, dtype=torch.int64),
         increment=torch.as_tensor(targets.increment, dtype=torch.int64),
+        # Pixels and labels are flattened row by row so graphs of any size batch
+        pixels=torch.as_tensor(tree_image.image.ravel() / 255.0, dtype=torch.float32),
+        label_map=torch.as_tensor(graph.label_map.ravel(), dtype=torch.int64),
+        height=torch.tensor([graph.label_map.shape[0]]),
         num_nodes=node_count,
     )
 

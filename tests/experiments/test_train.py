@@ -1,10 +1,12 @@
 import json
 from dataclasses import replace
 
+import numpy as np
 import pytest
 import torch
 from torch_geometric.data import Batch
 
+from letree.component_tree import ComponentTreeKind
 from letree.data.graphs import ObservationDataset, make_loader, to_graph
 from letree.experiments.losses import correction_losses
 from letree.experiments.train import (
@@ -14,6 +16,7 @@ from letree.experiments.train import (
     epoch_report,
     evaluate,
     fit,
+    run_model,
     selection_parts,
 )
 from letree.generation import (
@@ -23,6 +26,7 @@ from letree.generation import (
     SaltAndPepperNoise,
     SpeckleNoise,
     SquareImageConfig,
+    build_generation_sample,
 )
 from letree.model import LetreeModel
 
@@ -246,3 +250,42 @@ def test_selection_adds_the_zone_pointer_loss_only_when_trained() -> None:
     )
     observed = replace(settings, zone_pointer=True, stage="observed")
     assert selection_parts(observed) == ("loss/observed_parent",)
+
+
+class _Recorder(torch.nn.Module):
+    def forward(self, *arguments, **keywords):
+        self.arguments, self.keywords = arguments, keywords
+        return "output"
+
+
+def _image_graph(image):
+    sample = build_generation_sample(
+        np.asarray(image, dtype=np.uint8), ComponentTreeKind.MAX_TREE
+    )
+    return to_graph(sample.observed, sample.correction_targets)
+
+
+def test_run_model_passes_images_only_with_the_backbone() -> None:
+    first = _image_graph([[1, 2, 3], [4, 5, 6]])
+    second = _image_graph([[9, 9, 0], [9, 0, 0]])
+    data = Batch.from_data_list([first, second])
+    settings = RunSettings(dataset_root="", max_epochs=1, observed_steps=4)
+    model = _Recorder()
+
+    assert run_model(model, data, settings, 2) == "output"
+    assert model.keywords == {}
+    assert model.arguments[4:] == (4, 2)
+
+    run_model(model, data, replace(settings, backbone=True), None)
+    image = model.keywords["image"]
+    assert image.shape == (2, 2, 3)
+    torch.testing.assert_close(image[1] * 255.0, torch.tensor([[9.0, 9, 0], [9, 0, 0]]))
+    assert model.keywords["label_map"] is data.label_map
+    assert model.arguments[5] is None
+
+
+def test_run_model_rejects_mixed_image_sizes_with_the_backbone() -> None:
+    data = Batch.from_data_list([_image_graph([[1, 2]]), _image_graph([[1], [2]])])
+    settings = RunSettings(dataset_root="", max_epochs=1, backbone=True)
+    with pytest.raises(ValueError):
+        run_model(_Recorder(), data, settings, 0)

@@ -136,8 +136,10 @@ def test_corrupted_sample_selects_only_observed_graph_and_parent_targets() -> No
     torch.testing.assert_close(adapted.zone, torch.tensor([0]))
     torch.testing.assert_close(adapted.parent_zone, torch.tensor([0]))
     torch.testing.assert_close(adapted.increment, torch.tensor([0]))
+    # The backbone reads the observed image and labels, never the clean ones
+    torch.testing.assert_close(adapted.pixels, torch.tensor([30.0, 30.0]) / 255)
+    torch.testing.assert_close(adapted.label_map, torch.tensor([0, 0]))
     assert not hasattr(adapted, "image")
-    assert not hasattr(adapted, "label_map")
     assert not hasattr(adapted, "overlap_purity")
     assert not hasattr(adapted, "noise_config")
 
@@ -401,3 +403,36 @@ def test_clean_only_control_on_a_mixed_dataset(mixed_root) -> None:
 
     assert _items(dataset) == [(0, 0), (1, 0)]
     assert [dataset[i].corruption for i in range(2)] == ["clean", "clean"]
+
+
+def test_pixels_and_label_map_are_served_row_by_row() -> None:
+    image = np.array([[10, 10, 200], [10, 90, 200]], dtype=np.uint8)
+    graph = _graph(_reference_sample(image))
+    label_map = _reference_sample(image).observed.graph.label_map
+
+    torch.testing.assert_close(
+        graph.pixels, torch.tensor([10, 10, 200, 10, 90, 200]) / 255.0
+    )
+    assert graph.pixels.dtype == torch.float32
+    torch.testing.assert_close(graph.label_map, torch.as_tensor(label_map.ravel()))
+    torch.testing.assert_close(graph.height, torch.tensor([2]))
+    # Each pixel's node has that pixel's level
+    levels = graph.x[:, 0] * 255.0
+    torch.testing.assert_close(levels[graph.label_map], graph.pixels * 255.0)
+
+
+def test_batched_label_map_names_global_nodes_of_its_own_image() -> None:
+    first = _graph(_reference_sample(np.array([[2, 3, 2]], dtype=np.uint8)))
+    second = _graph(_reference_sample(np.array([[7, 7], [1, 7]], dtype=np.uint8)))
+
+    packed = next(iter(DataLoader([first, second], batch_size=2, shuffle=False)))
+
+    torch.testing.assert_close(
+        packed.label_map, torch.cat((first.label_map, second.label_map + 3))
+    )
+    torch.testing.assert_close(packed.pixels, torch.cat((first.pixels, second.pixels)))
+    torch.testing.assert_close(packed.height, torch.tensor([1, 2]))
+    owner = packed.batch[packed.label_map]
+    torch.testing.assert_close(owner, torch.tensor([0, 0, 0, 1, 1, 1, 1]))
+    restored = packed.to_data_list()
+    torch.testing.assert_close(restored[1].label_map, second.label_map)

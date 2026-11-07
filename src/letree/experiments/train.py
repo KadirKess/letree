@@ -30,9 +30,15 @@ SELECTION_PARTS = {
     "frozen": ("loss/set_pointer", "loss/contraction", "loss/increment"),
 }
 # The frozen stage keeps what the observed stage trained
-FROZEN_MODULES = ("encoder", "observed_gru", "observed_query", "observed_key")
+FROZEN_MODULES = (
+    "backbone",
+    "encoder",
+    "observed_gru",
+    "observed_query",
+    "observed_key",
+)
 # An observed run must match on these for its weights to mean the same thing
-OBSERVED_FIELDS = ("width", "aggregations", "observed_steps", "precision")
+OBSERVED_FIELDS = ("width", "aggregations", "observed_steps", "precision", "backbone")
 
 # Colab redraws subprocess output slowly, so refresh the bars at most every few seconds
 PROGRESS_SECONDS = 5
@@ -66,6 +72,7 @@ class RunSettings:
     observed_run: str | None = None
     zone_pointer: bool = False
     separating_weight: float = 1.0
+    backbone: bool = False
 
 
 def build_model(settings: RunSettings) -> LetreeModel:
@@ -75,6 +82,7 @@ def build_model(settings: RunSettings) -> LetreeModel:
         settings.aggregations,
         settings.attention,
         tf32_attention=settings.precision == "tf32",
+        backbone=settings.backbone,
     )
 
     # Node counts change every batch, so shapes are dynamic from the start
@@ -93,6 +101,25 @@ def build_model(settings: RunSettings) -> LetreeModel:
 def stage_correction_steps(settings: RunSettings) -> int | None:
     # The observed stage never runs the corrective loop
     return None if settings.stage == "observed" else settings.correction_steps
+
+
+def run_model(model, data, settings: RunSettings, correction_steps: int | None):
+    pixels = {}
+    if settings.backbone:
+        heights = data.height.unique()
+        if heights.numel() != 1 or data.pixels.numel() % data.num_graphs:
+            raise ValueError("The backbone needs images of one size per batch.")
+        image = data.pixels.view(data.num_graphs, int(heights), -1)
+        pixels = {"image": image, "label_map": data.label_map}
+    return model(
+        data.x,
+        data.edge_index,
+        data.rag_edge_index,
+        data.ptr,
+        settings.observed_steps,
+        correction_steps,
+        **pixels,
+    )
 
 
 def stage_losses(output, data, settings: RunSettings) -> dict[str, torch.Tensor]:
@@ -121,7 +148,9 @@ def load_frozen_observed(model: LetreeModel, settings: RunSettings, device) -> N
     if recorded["stage"] != "observed":
         raise ValueError(f"{observed_run} is not an observed stage run.")
     for field in OBSERVED_FIELDS:
-        mine, theirs = getattr(settings, field), recorded[field]
+        # Runs from before a field existed recorded its default
+        default = getattr(RunSettings, field, None)
+        mine, theirs = getattr(settings, field), recorded.get(field, default)
         if (list(mine) if isinstance(mine, tuple) else mine) != theirs:
             raise ValueError(f"{field} is {mine!r} here and {theirs!r} there.")
 
@@ -130,7 +159,8 @@ def load_frozen_observed(model: LetreeModel, settings: RunSettings, device) -> N
     state = torch.load(observed_run / "best.pt", map_location=device)
     model.load_state_dict(state["model"])
     for name in FROZEN_MODULES:
-        getattr(model, name).requires_grad_(False)
+        if getattr(model, name, None) is not None:
+            getattr(model, name).requires_grad_(False)
 
 
 def select_device() -> torch.device:
@@ -149,14 +179,7 @@ def train_epoch(model, loader, optimizer, settings, device) -> dict[str, float]:
     progress = tqdm(loader, desc="train", leave=False, mininterval=PROGRESS_SECONDS)
     for data in progress:
         data = data.to(device)
-        output = model(
-            data.x,
-            data.edge_index,
-            data.rag_edge_index,
-            data.ptr,
-            settings.observed_steps,
-            stage_correction_steps(settings),
-        )
+        output = run_model(model, data, settings, stage_correction_steps(settings))
         losses = stage_losses(output, data, settings)
 
         optimizer.zero_grad()
@@ -187,14 +210,7 @@ def evaluate(model, loader, settings, device) -> dict[str, float]:
         loader, desc="evaluate", leave=False, mininterval=PROGRESS_SECONDS
     ):
         data = data.to(device)
-        output = model(
-            data.x,
-            data.edge_index,
-            data.rag_edge_index,
-            data.ptr,
-            settings.observed_steps,
-            stage_correction_steps(settings),
-        )
+        output = run_model(model, data, settings, stage_correction_steps(settings))
         for name, value in stage_losses(output, data, settings).items():
             loss_totals[name] += value.item() * data.num_graphs
         graph_count += data.num_graphs
